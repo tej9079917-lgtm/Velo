@@ -35,8 +35,11 @@ import com.example.ui.BrowserMainScreen
 import com.example.ui.theme.VeloBrowserTheme
 import com.example.viewmodel.BrowserViewModel
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.flow.flowOf
 
 class MainActivity : ComponentActivity() {
 
@@ -93,8 +96,15 @@ private fun VeloBrowserApp(
     onConsumeExternalUrl: () -> Unit,
     onEnterPipMode: () -> Unit
 ) {
-    val auth = Firebase.auth
-    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    val context = LocalContext.current
+    val hasFirebase = remember(context) { FirebaseApp.getApps(context).isNotEmpty() }
+    val authFlow = remember(hasFirebase) {
+        if (hasFirebase) Firebase.auth.authStateFlow() else flowOf<FirebaseUser?>(null)
+    }
+    val initialUser = remember(hasFirebase) {
+        if (hasFirebase) Firebase.auth.currentUser else null
+    }
+    val currentUser by authFlow.collectAsStateWithLifecycle(initialValue = initialUser)
     val user = currentUser
     val sessionKey = user?.uid ?: "local_guest"
 
@@ -134,7 +144,7 @@ private fun BrowserWorkspaceRoot(
                 val app = checkNotNull(this[APPLICATION_KEY]) {
                     "APPLICATION_KEY missing from CreationExtras"
                 }
-                val syncRepository = if (currentUserId != null) {
+                val syncRepository = if (currentUserId != null && FirebaseApp.getApps(app).isNotEmpty()) {
                     val databaseId = app.getString(R.string.firestore_database_id)
                     VeloSyncRepository(FirebaseFirestore.getInstance(databaseId))
                 } else {
@@ -170,7 +180,7 @@ private fun BrowserWorkspaceRoot(
             initialExternalUrl = pendingExternalUrl,
             onConsumeExternalUrl = onConsumeExternalUrl,
             onEnterPipMode = onEnterPipMode,
-            onSignOut = { signOutGoogle(credentialManager, scope) }
+            onSignOut = { signOutGoogle(context, credentialManager, scope) }
         )
     }
 }

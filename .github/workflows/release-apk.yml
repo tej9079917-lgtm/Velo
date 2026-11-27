@@ -40,6 +40,9 @@ jobs:
       - name: Prepare signing keystore and env
         run: |
           touch -a .env
+          if [ -n "${{ secrets.GOOGLE_SERVICES_JSON }}" ]; then
+            echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | tr -d '\r\n ' | base64 -d > app/google-services.json
+          fi
           if [ -f debug.keystore.base64 ]; then
             tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore || rm -f debug.keystore
           fi

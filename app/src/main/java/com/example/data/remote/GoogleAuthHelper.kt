@@ -1,5 +1,6 @@
 package com.example.data.remote
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.util.Log
@@ -9,12 +10,12 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.NoCredentialException
-import com.example.R
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
@@ -37,6 +38,21 @@ fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
 }
 
 /**
+ * Resolves the Google Services generated `default_web_client_id` resource safely so builds
+ * without `app/google-services.json` (such as public CI releases) still compile and run in local mode.
+ */
+@SuppressLint("DiscouragedApi")
+private fun resolveDefaultWebClientId(context: Context): String? {
+    val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+    if (resId == 0) return null
+    return try {
+        context.getString(resId).takeIf { it.isNotBlank() }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/**
  * Silent auto-sign-in using GetGoogleIdOption (single option per request) with explicit NoCredentialException handling.
  */
 fun attemptAutoSignIn(
@@ -46,13 +62,16 @@ fun attemptAutoSignIn(
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
+    if (FirebaseApp.getApps(context).isEmpty()) {
+        onUnauthenticated()
+        return
+    }
     if (Firebase.auth.currentUser != null) {
         onAuthSuccess()
         return
     }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    val clientId = resolveDefaultWebClientId(context)
+    if (clientId == null) {
         onUnauthenticated()
         return
     }
@@ -93,10 +112,13 @@ fun onGoogleSignInClicked(
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
 ) {
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
-        onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
+    if (FirebaseApp.getApps(context).isEmpty()) {
+        onAuthError("Cloud Sync is unavailable in this local-only build (Firebase config not bundled).")
+        return
+    }
+    val clientId = resolveDefaultWebClientId(context)
+    if (clientId == null) {
+        onAuthError("Google Sign-In configuration missing: default_web_client_id not found.")
         return
     }
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
@@ -131,6 +153,7 @@ fun onGoogleSignInClicked(
  * Safe sign-out clearing Credential Manager state inside NonCancellable before Firebase signOut.
  */
 fun signOutGoogle(
+    context: Context,
     credentialManager: CredentialManager,
     scope: CoroutineScope,
     onSignOutComplete: () -> Unit = {}
@@ -142,7 +165,9 @@ fun signOutGoogle(
             } catch (e: Exception) {
                 Log.w("Auth", "Failed to clear credential state: ${e.message}")
             } finally {
-                Firebase.auth.signOut()
+                if (FirebaseApp.getApps(context).isNotEmpty()) {
+                    Firebase.auth.signOut()
+                }
                 onSignOutComplete()
             }
         }
