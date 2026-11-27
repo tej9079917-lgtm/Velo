@@ -1,0 +1,268 @@
+{
+  "entities": {
+    "VaultConfig": {
+      "title": "VaultConfig",
+      "description": "End-to-end encryption key derivation metadata and verification sentinel for a user's zero-knowledge vault.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "saltBase64": {
+          "type": "string",
+          "description": "Base64-encoded random 16-byte PBKDF2 salt."
+        },
+        "verifierCiphertext": {
+          "type": "string",
+          "description": "Base64-encoded AES-256-GCM encrypted verification sentinel."
+        },
+        "verifierIv": {
+          "type": "string",
+          "description": "Base64-encoded 12-byte IV used for verifierCiphertext."
+        },
+        "kdfIterations": {
+          "type": "integer",
+          "description": "PBKDF2WithHmacSHA256 iteration count."
+        },
+        "keyFingerprint": {
+          "type": "string",
+          "description": "Truncated SHA-256 display fingerprint of the derived E2EE key."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "saltBase64",
+        "verifierCiphertext",
+        "verifierIv",
+        "kdfIterations",
+        "keyFingerprint",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VaultItem": {
+      "title": "VaultItem",
+      "description": "An end-to-end encrypted password manager credential stored in the user's synced vault.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "encryptedPayload": {
+          "type": "string",
+          "description": "Base64 AES-256-GCM ciphertext of the JSON credential payload (siteName, siteUrl, username, password, notes)."
+        },
+        "iv": {
+          "type": "string",
+          "description": "Base64 12-byte GCM initialization vector."
+        },
+        "cryptoVersion": {
+          "type": "integer",
+          "description": "Cipher format version."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "encryptedPayload",
+        "iv",
+        "cryptoVersion",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Shortcut": {
+      "title": "Shortcut",
+      "description": "An end-to-end encrypted customizable homepage shortcut synced across devices.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "encryptedPayload": {
+          "type": "string",
+          "description": "Base64 AES-256-GCM ciphertext of the JSON shortcut payload (title, url, accentHex)."
+        },
+        "iv": {
+          "type": "string",
+          "description": "Base64 12-byte GCM initialization vector."
+        },
+        "orderIndex": {
+          "type": "integer",
+          "description": "Display sort index on the homepage grid."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "encryptedPayload",
+        "iv",
+        "orderIndex",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ReadingPage": {
+      "title": "ReadingPage",
+      "description": "An end-to-end encrypted offline reading list item synced across devices, linked to local cached HTML via urlHash.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "encryptedPayload": {
+          "type": "string",
+          "description": "Base64 AES-256-GCM ciphertext of JSON reading metadata and excerpt (title, url, excerpt, cachedByteSize)."
+        },
+        "iv": {
+          "type": "string",
+          "description": "Base64 12-byte GCM initialization vector."
+        },
+        "urlHash": {
+          "type": "string",
+          "description": "SHA-256 hex digest of the normalized URL for privacy-preserving deduplication."
+        },
+        "archived": {
+          "type": "boolean",
+          "description": "Whether the user marked this offline article as archived."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "encryptedPayload",
+        "iv",
+        "urlHash",
+        "archived",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BrowserPreferences": {
+      "title": "BrowserPreferences",
+      "description": "Cross-platform synced minimalist browser settings and cumulative privacy stats.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "themeMode": {
+          "type": "string",
+          "enum": ["SYSTEM", "LIGHT", "DARK"],
+          "description": "Preferred UI appearance mode."
+        },
+        "adBlockEnabled": {
+          "type": "boolean",
+          "description": "Whether the built-in ad and tracker blocker is enabled."
+        },
+        "httpsOnlyEnabled": {
+          "type": "boolean",
+          "description": "Whether HTTPS-Only upgrades and insecure warnings are enabled."
+        },
+        "darkWebPagesEnabled": {
+          "type": "boolean",
+          "description": "Whether late-night dark styling is applied to web pages."
+        },
+        "notificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether real-time sync, offline cache, and security alerts are enabled."
+        },
+        "searchEngine": {
+          "type": "string",
+          "enum": ["DUCKDUCKGO", "STARTPAGE", "BRAVE", "GOOGLE"],
+          "description": "Default search engine for omnibox and voice queries."
+        },
+        "trackersBlockedTotal": {
+          "type": "integer",
+          "description": "Cumulative count of blocked ad and tracker requests synced across devices."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "themeMode",
+        "adBlockEnabled",
+        "httpsOnlyEnabled",
+        "darkWebPagesEnabled",
+        "notificationsEnabled",
+        "searchEngine",
+        "trackersBlockedTotal",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/vaultConfig/{configId}": {
+      "schema": { "$ref": "#/entities/VaultConfig" },
+      "description": "Stores the user's E2EE KDF salt and verification sentinel."
+    },
+    "/users/{userId}/vaultItems/{itemId}": {
+      "schema": { "$ref": "#/entities/VaultItem" },
+      "description": "Stores end-to-end encrypted password manager credentials."
+    },
+    "/users/{userId}/shortcuts/{shortcutId}": {
+      "schema": { "$ref": "#/entities/Shortcut" },
+      "description": "Stores end-to-end encrypted customizable homepage shortcuts."
+    },
+    "/users/{userId}/readingList/{pageId}": {
+      "schema": { "$ref": "#/entities/ReadingPage" },
+      "description": "Stores end-to-end encrypted offline reading pages synced across devices."
+    },
+    "/users/{userId}/preferences/{prefId}": {
+      "schema": { "$ref": "#/entities/BrowserPreferences" },
+      "description": "Stores cross-platform synced browser preferences and shield metrics."
+    }
+  }
+}

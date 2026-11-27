@@ -1,0 +1,187 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: default deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL PRIMITIVE HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- VALIDATION BLUEPRINTS (ANTI-UPDATE-GAP) ---
+    function isValidVaultConfig(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.saltBase64 is string && data.saltBase64.size() >= 16 && data.saltBase64.size() <= 128 &&
+             data.verifierCiphertext is string && data.verifierCiphertext.size() >= 16 && data.verifierCiphertext.size() <= 512 &&
+             data.verifierIv is string && data.verifierIv.size() >= 12 && data.verifierIv.size() <= 64 &&
+             data.kdfIterations is int && data.kdfIterations >= 100000 && data.kdfIterations <= 500000 &&
+             data.keyFingerprint is string && data.keyFingerprint.size() >= 8 && data.keyFingerprint.size() <= 128 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidVaultItem(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.encryptedPayload is string && data.encryptedPayload.size() >= 16 && data.encryptedPayload.size() <= 8192 &&
+             data.iv is string && data.iv.size() >= 12 && data.iv.size() <= 64 &&
+             data.cryptoVersion is int && data.cryptoVersion >= 1 && data.cryptoVersion <= 10 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidShortcut(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.encryptedPayload is string && data.encryptedPayload.size() >= 16 && data.encryptedPayload.size() <= 4096 &&
+             data.iv is string && data.iv.size() >= 12 && data.iv.size() <= 64 &&
+             data.orderIndex is int && data.orderIndex >= 0 && data.orderIndex <= 1000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidReadingPage(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.encryptedPayload is string && data.encryptedPayload.size() >= 16 && data.encryptedPayload.size() <= 16384 &&
+             data.iv is string && data.iv.size() >= 12 && data.iv.size() <= 64 &&
+             data.urlHash is string && data.urlHash.size() >= 16 && data.urlHash.size() <= 128 &&
+             data.archived is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidPreferences(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.themeMode is string && data.themeMode.size() <= 16 && data.themeMode in ['SYSTEM', 'LIGHT', 'DARK'] &&
+             data.adBlockEnabled is bool &&
+             data.httpsOnlyEnabled is bool &&
+             data.darkWebPagesEnabled is bool &&
+             data.notificationsEnabled is bool &&
+             data.searchEngine is string && data.searchEngine.size() <= 24 && data.searchEngine in ['DUCKDUCKGO', 'STARTPAGE', 'BRAVE', 'GOOGLE'] &&
+             data.trackersBlockedTotal is int && data.trackersBlockedTotal >= 0 && data.trackersBlockedTotal <= 100000000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // --- USER-SCOPED COLLECTIONS ---
+    match /users/{userId} {
+      // No direct root user doc reads/writes needed; subcollections hold isolated encrypted data
+
+      match /vaultConfig/{configId} {
+        allow get: if isOwner(userId) && isValidId(configId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(configId) &&
+                         incoming().keys().hasAll(['userId', 'saltBase64', 'verifierCiphertext', 'verifierIv', 'kdfIterations', 'keyFingerprint', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'saltBase64', 'verifierCiphertext', 'verifierIv', 'kdfIterations', 'keyFingerprint', 'createdAt', 'updatedAt']) &&
+                         isValidVaultConfig(incoming(), userId);
+        allow update: if isOwner(userId) &&
+                         isValidId(configId) &&
+                         isValidVaultConfig(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['saltBase64', 'verifierCiphertext', 'verifierIv', 'kdfIterations', 'keyFingerprint', 'updatedAt']);
+        allow delete: if isOwner(userId) && isValidId(configId);
+      }
+
+      match /vaultItems/{itemId} {
+        allow get: if isOwner(userId) && isValidId(itemId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(itemId) &&
+                         incoming().keys().hasAll(['userId', 'encryptedPayload', 'iv', 'cryptoVersion', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'encryptedPayload', 'iv', 'cryptoVersion', 'createdAt', 'updatedAt']) &&
+                         isValidVaultItem(incoming(), userId);
+        allow update: if isOwner(userId) &&
+                         isValidId(itemId) &&
+                         isValidVaultItem(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['encryptedPayload', 'iv', 'cryptoVersion', 'updatedAt']);
+        allow delete: if isOwner(userId) && isValidId(itemId);
+      }
+
+      match /shortcuts/{shortcutId} {
+        allow get: if isOwner(userId) && isValidId(shortcutId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(shortcutId) &&
+                         incoming().keys().hasAll(['userId', 'encryptedPayload', 'iv', 'orderIndex', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'encryptedPayload', 'iv', 'orderIndex', 'createdAt', 'updatedAt']) &&
+                         isValidShortcut(incoming(), userId);
+        allow update: if isOwner(userId) &&
+                         isValidId(shortcutId) &&
+                         isValidShortcut(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['encryptedPayload', 'iv', 'orderIndex', 'updatedAt']);
+        allow delete: if isOwner(userId) && isValidId(shortcutId);
+      }
+
+      match /readingList/{pageId} {
+        allow get: if isOwner(userId) && isValidId(pageId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(pageId) &&
+                         incoming().keys().hasAll(['userId', 'encryptedPayload', 'iv', 'urlHash', 'archived', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'encryptedPayload', 'iv', 'urlHash', 'archived', 'createdAt', 'updatedAt']) &&
+                         isValidReadingPage(incoming(), userId);
+        allow update: if isOwner(userId) &&
+                         isValidId(pageId) &&
+                         isValidReadingPage(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           incoming().diff(existing()).affectedKeys().hasOnly(['encryptedPayload', 'iv', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['archived', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['encryptedPayload', 'iv', 'archived', 'updatedAt'])
+                         );
+        allow delete: if isOwner(userId) && isValidId(pageId);
+      }
+
+      match /preferences/{prefId} {
+        allow get: if isOwner(userId) && isValidId(prefId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(prefId) &&
+                         incoming().keys().hasAll(['userId', 'themeMode', 'adBlockEnabled', 'httpsOnlyEnabled', 'darkWebPagesEnabled', 'notificationsEnabled', 'searchEngine', 'trackersBlockedTotal', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'themeMode', 'adBlockEnabled', 'httpsOnlyEnabled', 'darkWebPagesEnabled', 'notificationsEnabled', 'searchEngine', 'trackersBlockedTotal', 'createdAt', 'updatedAt']) &&
+                         isValidPreferences(incoming(), userId);
+        allow update: if isOwner(userId) &&
+                         isValidId(prefId) &&
+                         isValidPreferences(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           incoming().diff(existing()).affectedKeys().hasOnly(['themeMode', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['adBlockEnabled', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['httpsOnlyEnabled', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['darkWebPagesEnabled', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['notificationsEnabled', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['searchEngine', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['trackersBlockedTotal', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['themeMode', 'adBlockEnabled', 'httpsOnlyEnabled', 'darkWebPagesEnabled', 'notificationsEnabled', 'searchEngine', 'trackersBlockedTotal', 'updatedAt'])
+                         );
+        allow delete: if isOwner(userId) && isValidId(prefId);
+      }
+    }
+  }
+}

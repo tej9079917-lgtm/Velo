@@ -1,0 +1,6 @@
+{
+  "name": "Velo Browser",
+  "description": "A lightweight, minimalist privacy web browser with tabbed browsing, ad blocking, private mode, end-to-end encrypted password vault, cross-platform sync, voice search, and offline reading.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
