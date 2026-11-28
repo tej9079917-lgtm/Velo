@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -87,6 +88,7 @@ class WebViewTabManager(
                 builtInZoomControls = true
                 displayZoomControls = false
                 setSupportZoom(true)
+                mediaPlaybackRequiresUserGesture = false
                 if (tab.isPrivate) {
                     domStorageEnabled = false
                     cacheMode = WebSettings.LOAD_NO_CACHE
@@ -115,6 +117,24 @@ class WebViewTabManager(
                 override fun onReceivedTitle(view: WebView?, title: String?) {
                     if (!title.isNullOrBlank()) {
                         callbacks.onTitleReceived(tab.id, title)
+                    }
+                }
+
+                override fun onPermissionRequest(request: PermissionRequest?) {
+                    val req = request ?: return
+                    val originScheme = req.origin?.scheme?.lowercase()
+                    if (originScheme != "https") {
+                        req.deny()
+                        return
+                    }
+                    // Grant EME/Protected Media ID on HTTPS origins (required for Spotify Web playback)
+                    val allowed = req.resources.filter { res ->
+                        res == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID
+                    }.toTypedArray()
+                    if (allowed.isNotEmpty()) {
+                        req.grant(allowed)
+                    } else {
+                        req.deny()
                     }
                 }
             }
@@ -191,6 +211,9 @@ class WebViewTabManager(
                         if (adBlockEnabled) {
                             view.evaluateJavascript(AdBlockerEngine.COSMETIC_AD_CLEANUP_JS, null)
                         }
+                        WebAppService.getEnhancementScriptForUrl(safeUrl)?.let { appScript ->
+                            view.evaluateJavascript(appScript, null)
+                        }
                         applyDarkPageStyle(view, darkWebPagesEnabled)
                         scanPageForVideos(tab.id)
                     }
@@ -225,6 +248,15 @@ class WebViewTabManager(
         val wv = getOrCreateWebView(tab)
         if (bypassHttpsCheck) {
             httpBypassUrls.add(url)
+        }
+        val targetUa = WebAppService.requiredUserAgentForUrl(url, tab.isDesktopMode)
+        if (wv.settings.userAgentString != targetUa) {
+            wv.settings.userAgentString = targetUa
+        }
+        // Enable 3rd-party cookies selectively for Spotify/WhatsApp/Instagram auth flows when not private
+        val matchedApp = WebAppService.matchForUrl(url)
+        if (!tab.isPrivate) {
+            CookieManager.getInstance().setAcceptThirdPartyCookies(wv, matchedApp != null)
         }
         currentHosts[tab.id] = host
         wv.loadUrl(url)

@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.speech.RecognizerIntent
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -12,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -29,6 +31,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -42,6 +45,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -49,6 +53,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.OfflinePin
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SwapVert
@@ -78,6 +83,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -93,7 +99,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.graphics.toColorInt
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.browser.ActiveOverlay
@@ -103,6 +113,8 @@ import com.example.browser.SecretMediaType
 import com.example.browser.SplitPane
 import com.example.browser.TabWebCallbacks
 import com.example.browser.VideoPlayerRequest
+import com.example.browser.WebAppIntegrationMode
+import com.example.browser.WebAppService
 import com.example.browser.WebViewTabManager
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ShieldEmerald
@@ -168,6 +180,37 @@ fun BrowserMainScreen(
     val secretVaultError by viewModel.secretVaultError.collectAsStateWithLifecycle()
     val secretMediaItems by viewModel.secretMediaItems.collectAsStateWithLifecycle()
     val secretImagePreview by viewModel.secretImagePreview.collectAsStateWithLifecycle()
+    val backgroundAudioActive by viewModel.backgroundAudioActive.collectAsStateWithLifecycle()
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val activity = context as? Activity
+
+    // Block OS screenshots, screen recordings & recents thumbnails while Vaults are open
+    DisposableEffect(activeOverlay, activity) {
+        val isSensitiveScreen = activeOverlay == ActiveOverlay.PASSWORD_VAULT ||
+            activeOverlay == ActiveOverlay.SECRET_MEDIA_VAULT ||
+            activeOverlay == ActiveOverlay.SECRET_VAULT_SETUP
+        if (isSensitiveScreen) {
+            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        onDispose {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
+
+    // Automatically lock Password Vault & Secret Media Vault whenever app leaves foreground
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                viewModel.lockVault()
+                viewModel.lockSecretMediaVault()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val isSignedIn = viewModel.currentUserId != null
     val unlockedFingerprint = (vaultGateState as? VaultGateState.Unlocked)?.keyFingerprint.orEmpty()
@@ -603,6 +646,107 @@ fun BrowserMainScreen(
                                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
                                 modifier = Modifier.fillMaxWidth().height(2.5.dp)
                             )
+                        }
+
+                        // --- NATIVE-LOOKING ALL-IN-ONE APPS HUB BAR (Instagram, WhatsApp, Spotify, Netflix, Prime) ---
+                        val activeWebApp = remember(activeTab.url) { WebAppService.matchForUrl(activeTab.url) }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 12.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            WebAppService.entries.forEach { appService ->
+                                val isSelected = activeWebApp == appService
+                                val dotColor = remember(appService.accentHex) {
+                                    Color(appService.accentHex.toColorInt())
+                                }
+                                Surface(
+                                    color = if (isSelected) dotColor.copy(alpha = 0.22f)
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier
+                                        .height(34.dp)
+                                        .border(
+                                            width = if (isSelected) 1.2.dp else 0.75.dp,
+                                            color = if (isSelected) dotColor else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+                                            shape = RoundedCornerShape(12.dp)
+                                        )
+                                        .clickable {
+                                            viewModel.launchWebApp(
+                                                service = appService,
+                                                preferNativeForHybrid = true,
+                                                onOpenUrlInTab = { url -> navigateCurrentTab(url) }
+                                            )
+                                        }
+                                        .testTag("webapp_tab_${appService.id}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .background(dotColor, CircleShape)
+                                        )
+                                        Text(
+                                            text = appService.shortLabel,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (isSelected) dotColor else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        if (appService.mode == WebAppIntegrationMode.HYBRID_NATIVE) {
+                                            Icon(
+                                                imageVector = Icons.Default.OpenInNew,
+                                                contentDescription = "Hybrid HD app",
+                                                tint = dotColor.copy(alpha = 0.85f),
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Background Audio Foreground Service Toggle Pill (ideal for Spotify Web)
+                            if (activeWebApp == WebAppService.SPOTIFY || backgroundAudioActive) {
+                                Surface(
+                                    color = if (backgroundAudioActive) ShieldEmerald.copy(alpha = 0.22f)
+                                    else MaterialTheme.colorScheme.primaryContainer,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier
+                                        .height(34.dp)
+                                        .clickable {
+                                            viewModel.toggleBackgroundAudio(
+                                                title = activeTab.title.ifBlank { "Spotify Web Audio" },
+                                                subtitle = "Velo Background Playback"
+                                            )
+                                        }
+                                        .testTag("bg_audio_toggle_pill")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Headphones,
+                                            contentDescription = "Toggle background audio",
+                                            tint = if (backgroundAudioActive) ShieldEmerald else MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Text(
+                                            text = if (backgroundAudioActive) "BG Audio ON" else "BG Audio",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (backgroundAudioActive) ShieldEmerald else MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1469,6 +1613,7 @@ fun BrowserMainScreen(
                                 viewModel.showTransientBanner("Autofilled ${cred.siteName} into current page.")
                             },
                             onCopiedNotice = { viewModel.showTransientBanner(it) },
+                            onLockVault = { viewModel.lockVault() },
                             onDismiss = { viewModel.setOverlay(ActiveOverlay.NONE) }
                         )
                     }

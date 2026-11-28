@@ -19,6 +19,8 @@ import android.text.StaticLayout
 import android.text.TextPaint
 import android.webkit.WebView
 import androidx.core.graphics.createBitmap
+import androidx.core.graphics.withScale
+import androidx.core.graphics.withTranslation
 import com.example.browser.PdfDocumentItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -280,10 +282,9 @@ class PdfEngine(private val context: Context) {
                         .setLineSpacing(4f, 1.15f)
                         .build()
 
-                    canvas.save()
-                    canvas.translate(margin.toFloat(), topY)
-                    pageLayout.draw(canvas)
-                    canvas.restore()
+                    canvas.withTranslation(x = margin.toFloat(), y = topY) {
+                        pageLayout.draw(this)
+                    }
 
                     canvas.drawText(
                         "Velo Browser • Page $pageNumber",
@@ -338,12 +339,11 @@ class PdfEngine(private val context: Context) {
                     val page = pdfDoc.startPage(pageInfo)
                     val canvas = page.canvas
                     canvas.drawColor(Color.WHITE)
-                    canvas.save()
-                    canvas.scale(scaleToA4, scaleToA4)
                     val scrollOffset = p * sliceHeightPx
-                    canvas.translate(0f, -scrollOffset.toFloat())
-                    webView.draw(canvas)
-                    canvas.restore()
+                    canvas.withScale(x = scaleToA4, y = scaleToA4) {
+                        translate(0f, -scrollOffset.toFloat())
+                        webView.draw(this)
+                    }
                     pdfDoc.finishPage(page)
                 }
                 webView.scrollTo(webView.scrollX, originalScrollY)

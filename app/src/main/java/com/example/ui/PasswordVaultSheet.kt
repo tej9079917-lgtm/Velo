@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EnhancedEncryption
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Password
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Visibility
@@ -57,10 +58,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,6 +77,9 @@ import com.example.browser.VaultCredential
 import com.example.crypto.E2EECryptoEngine
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ShieldEmerald
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 @Composable
@@ -85,11 +91,13 @@ fun PasswordVaultSheet(
     onDeleteCredential: (String) -> Unit,
     onAutofillCredential: (VaultCredential) -> Unit,
     onCopiedNotice: (String) -> Unit,
+    onLockVault: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     BackHandler(onBack = onDismiss)
 
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var searchQuery by remember { mutableStateOf("") }
     var editingCredential by remember { mutableStateOf<VaultCredential?>(null) }
     var showCreateDialog by remember { mutableStateOf(false) }
@@ -136,17 +144,31 @@ fun PasswordVaultSheet(
                             modifier = Modifier.size(13.dp)
                         )
                         Text(
-                            text = "AES-256-GCM E2EE • KEY $keyFingerprint",
+                            text = "3-LAYER E2EE • AES-GCM + HKDF + HMAC • $keyFingerprint",
                             style = MaterialTheme.typography.labelSmall,
-                            color = ShieldEmerald
+                            color = ShieldEmerald,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
-                IconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.testTag("close_vault_button")
-                ) {
-                    Icon(Icons.Default.Close, contentDescription = "Close password vault")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onLockVault,
+                        modifier = Modifier.testTag("lock_password_vault_button")
+                    ) {
+                        Icon(
+                            Icons.Default.Lock,
+                            contentDescription = "Lock password vault",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.testTag("close_vault_button")
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Close password vault")
+                    }
                 }
             }
 
@@ -206,12 +228,12 @@ fun PasswordVaultSheet(
                             credential = cred,
                             canAutofillOnPage = activePageUrl.startsWith("http"),
                             onCopyUsername = {
-                                copyTextSecurely(context, "Username", cred.username, sensitive = false)
+                                copyTextSecurely(context, scope, "Username", cred.username, sensitive = false)
                                 onCopiedNotice("Username copied.")
                             },
                             onCopyPassword = {
-                                copyTextSecurely(context, "Password", cred.password, sensitive = true)
-                                onCopiedNotice("Password copied (sensitive clipboard flag set).")
+                                copyTextSecurely(context, scope, "Password", cred.password, sensitive = true)
+                                onCopiedNotice("Password copied (auto-clears clipboard in 30s).")
                             },
                             onAutofill = { onAutofillCredential(cred) },
                             onEdit = { editingCredential = cred },
@@ -264,6 +286,14 @@ private fun CredentialCard(
     onDelete: () -> Unit
 ) {
     var revealPassword by remember { mutableStateOf(false) }
+
+    // Auto re-mask revealed password after 10 seconds to prevent shoulder-surfing
+    LaunchedEffect(revealPassword) {
+        if (revealPassword) {
+            delay(10_000L)
+            revealPassword = false
+        }
+    }
 
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -513,7 +543,13 @@ private fun CredentialEditorDialog(
     )
 }
 
-private fun copyTextSecurely(context: Context, label: String, value: String, sensitive: Boolean) {
+private fun copyTextSecurely(
+    context: Context,
+    scope: CoroutineScope,
+    label: String,
+    value: String,
+    sensitive: Boolean
+) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
     val clip = ClipData.newPlainText(label, value)
     if (sensitive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -522,4 +558,20 @@ private fun copyTextSecurely(context: Context, label: String, value: String, sen
         }
     }
     clipboard.setPrimaryClip(clip)
+    if (sensitive) {
+        scope.launch {
+            delay(30_000L)
+            try {
+                val current = clipboard.primaryClip?.getItemAt(0)?.text?.toString()
+                if (current == value) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        clipboard.clearPrimaryClip()
+                    } else {
+                        clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
 }

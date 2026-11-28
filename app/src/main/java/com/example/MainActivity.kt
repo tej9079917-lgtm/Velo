@@ -3,6 +3,7 @@ package com.example
 import android.app.PictureInPictureParams
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
@@ -76,10 +77,16 @@ class MainActivity : ComponentActivity() {
 
     private fun enterBrowserPipMode() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val params = PictureInPictureParams.Builder()
+            val builder = PictureInPictureParams.Builder()
                 .setAspectRatio(Rational(16, 9))
-                .build()
-            enterPictureInPictureMode(params)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val sourceRect = Rect()
+                window.decorView.getGlobalVisibleRect(sourceRect)
+                builder
+                    .setSourceRectHint(sourceRect)
+                    .setAutoEnterEnabled(true)
+            }
+            enterPictureInPictureMode(builder.build())
         }
     }
 

@@ -34,6 +34,8 @@ import com.example.browser.SplitPane
 import com.example.browser.ThemeMode
 import com.example.browser.VaultCredential
 import com.example.browser.VideoPlayerRequest
+import com.example.browser.WebAppIntegrationMode
+import com.example.browser.WebAppService
 import com.example.crypto.E2EECryptoEngine
 import com.example.crypto.SecretMediaVaultManager
 import com.example.data.local.CachedPageDao
@@ -59,6 +61,7 @@ import com.example.data.remote.VeloSyncRepository
 import com.example.media.PdfEngine
 import com.example.media.SpeedTestEngine
 import com.example.media.VideoDownloadEngine
+import com.example.system.MediaPlaybackForegroundService
 import com.example.system.NetworkConnectivityObserver
 import com.example.system.VeloNotificationManager
 import com.google.firebase.Timestamp
@@ -304,6 +307,10 @@ class BrowserViewModel(
 
     private val _secretImagePreview = MutableStateFlow<Pair<SecretMediaItem, ByteArray>?>(null)
     val secretImagePreview: StateFlow<Pair<SecretMediaItem, ByteArray>?> = _secretImagePreview.asStateFlow()
+
+    // --- ALL-IN-ONE WEB APPS HUB & BACKGROUND AUDIO FOREGROUND SERVICE ---
+    private val _backgroundAudioActive = MutableStateFlow(false)
+    val backgroundAudioActive: StateFlow<Boolean> = _backgroundAudioActive.asStateFlow()
 
     // --- CONNECTIVITY ---
     val isOnline: StateFlow<Boolean> = connectivityObserver.observeOnlineStatus()
@@ -1214,7 +1221,7 @@ class BrowserViewModel(
                 put("notes", notes.trim().take(500))
             }.toString()
             val env = withContext(Dispatchers.Default) {
-                E2EECryptoEngine.encrypt(payloadJson, key)
+                E2EECryptoEngine.encryptMultiLayer(payloadJson, key)
             }
             val result = if (existingId.isNullOrBlank()) {
                 repo.addVaultItem(uid, env.ciphertextBase64, env.ivBase64)
@@ -1222,9 +1229,9 @@ class BrowserViewModel(
                 repo.updateVaultItem(uid, existingId, env.ciphertextBase64, env.ivBase64)
             }
             if (result.isSuccess) {
-                showTransientBanner("Credential encrypted (AES-256-GCM) & synced.")
+                showTransientBanner("Password sealed with 3-Layer E2EE (AES-GCM + HKDF + HMAC).")
                 if (settings.value.notificationsEnabled) {
-                    notificationManager.notifySyncUpdate("Password vault synced for ${siteName.trim()}")
+                    notificationManager.notifySyncUpdate("3-Layer encrypted vault synced for ${siteName.trim()}")
                 }
             } else {
                 showTransientBanner("Could not sync vault entry.")
@@ -1494,7 +1501,7 @@ class BrowserViewModel(
 
     private fun decryptVaultItem(doc: VaultItemDoc, key: SecretKey): VaultCredential? {
         return try {
-            val json = JSONObject(E2EECryptoEngine.decrypt(doc.encryptedPayload, doc.iv, key))
+            val json = JSONObject(E2EECryptoEngine.decryptAuto(doc.encryptedPayload, doc.iv, key))
             val ts = (doc.updatedAt ?: doc.createdAt ?: Timestamp.now()).toDate().time
             VaultCredential(
                 id = doc.id,
@@ -2237,6 +2244,54 @@ class BrowserViewModel(
         }
     }
 
+    // --- ALL-IN-ONE WEB APPS HUB & BACKGROUND AUDIO SERVICE ---
+
+    fun launchWebApp(
+        service: WebAppService,
+        preferNativeForHybrid: Boolean = true,
+        onOpenUrlInTab: (String) -> Unit
+    ) {
+        if (preferNativeForHybrid && service.mode == WebAppIntegrationMode.HYBRID_NATIVE) {
+            val launchedNative = WebAppService.launchNativeAppIfInstalled(appContext, service)
+            if (launchedNative) {
+                showTransientBanner("Opened official ${service.label} app for hardware Widevine L1 HD/4K.")
+                return
+            } else {
+                showTransientBanner("${service.label} app not installed — opening desktop web view.")
+            }
+        }
+        onOpenUrlInTab(service.url)
+        when (service) {
+            WebAppService.WHATSAPP -> showTransientBanner("WhatsApp Web active (Desktop UA + Mobile Single-Column UI).")
+            WebAppService.SPOTIFY -> showTransientBanner("Spotify Web active — tap BG Audio to keep playing with screen off.")
+            WebAppService.INSTAGRAM -> showTransientBanner("Instagram Web active (app banners hidden).")
+            else -> Unit
+        }
+    }
+
+    fun toggleBackgroundAudio(title: String, subtitle: String) {
+        val next = !_backgroundAudioActive.value
+        _backgroundAudioActive.value = next
+        if (next) {
+            MediaPlaybackForegroundService.start(
+                context = appContext,
+                title = title.ifBlank { "Velo Background Audio" },
+                subtitle = subtitle.ifBlank { "Screen-off audio session active" }
+            )
+            showTransientBanner("Background Audio Foreground Service started.")
+        } else {
+            MediaPlaybackForegroundService.stop(appContext)
+            showTransientBanner("Background Audio stopped.")
+        }
+    }
+
+    fun stopBackgroundAudio() {
+        if (_backgroundAudioActive.value) {
+            _backgroundAudioActive.value = false
+            MediaPlaybackForegroundService.stop(appContext)
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         focusTimerJob?.cancel()
@@ -2244,6 +2299,7 @@ class BrowserViewModel(
         speedTestJob?.cancel()
         videoDownloadEngine.cancelActiveDownload()
         secretVaultManager.wipeAllTempPreviews()
+        MediaPlaybackForegroundService.stop(appContext)
     }
 
     companion object {
