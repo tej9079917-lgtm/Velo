@@ -1,0 +1,109 @@
+{
+  "name": "velo-browser-windows",
+  "version": "1.0.0",
+  "description": "Velo Browser for Windows — Private Chromium browser with 3-Layer Encrypted Password Vault, Stealth Secret Media Vault, Video & Full-Size Image Downloader, PDF Converter, and Speed Test Meter.",
+  "main": "src/main.js",
+  "author": "Velo Browser",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win --x64",
+    "build:installer": "electron-builder --win nsis --x64",
+    "build:portable": "electron-builder --win portable --x64"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.aistudio.velobrowser.windows",
+    "productName": "Velo Browser",
+    "copyright": "Copyright © 2026 Velo Browser",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "VeloBrowser-${target}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Velo Browser",
+      "artifactName": "VeloBrowser-Setup.exe"
+    },
+    "portable": {
+      "artifactName": "VeloBrowser-Portable.exe"
+    },
+    "fileAssociations": [
+      {
+        "ext": "pdf",
+        "name": "PDF Document",
+        "mimeType": "application/pdf",
+        "role": "Viewer"
+      },
+      {
+        "ext": "mp4",
+        "name": "MP4 Video",
+        "mimeType": "video/mp4",
+        "role": "Viewer"
+      },
+      {
+        "ext": "webm",
+        "name": "WebM Video",
+        "mimeType": "video/webm",
+        "role": "Viewer"
+      },
+      {
+        "ext": "mkv",
+        "name": "MKV Video",
+        "mimeType": "video/x-matroska",
+        "role": "Viewer"
+      },
+      {
+        "ext": "jpg",
+        "name": "JPEG Image",
+        "mimeType": "image/jpeg",
+        "role": "Viewer"
+      },
+      {
+        "ext": "jpeg",
+        "name": "JPEG Image",
+        "mimeType": "image/jpeg",
+        "role": "Viewer"
+      },
+      {
+        "ext": "png",
+        "name": "PNG Image",
+        "mimeType": "image/png",
+        "role": "Viewer"
+      },
+      {
+        "ext": "webp",
+        "name": "WebP Image",
+        "mimeType": "image/webp",
+        "role": "Viewer"
+      }
+    ]
+  }
+}

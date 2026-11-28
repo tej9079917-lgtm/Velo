@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file: https: http:; media-src 'self' file: blob: data: https: http:; object-src 'self' file: blob:; frame-src 'self' file: blob:;" />
+  <title>Velo Browser</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app-shell">
+    <!-- Top Tab Bar -->
+    <header id="tab-bar">
+      <div class="brand-pill" title="Velo Browser">
+        <span class="brand-dot"></span>
+        <span class="brand-name">Velo</span>
+      </div>
+      <div id="tabs-strip" role="tablist" aria-label="Browser Tabs"></div>
+      <div class="tab-actions">
+        <button id="btn-new-tab" class="icon-btn" title="New Tab (Ctrl+T)">+</button>
+        <button id="btn-new-private" class="icon-btn private-accent" title="New Private Tab (Ctrl+Shift+N)">Priv</button>
+        <button id="btn-split-toggle" class="icon-btn" title="Toggle Split-Screen">Split</button>
+        <button id="btn-theme-toggle" class="icon-btn" title="Toggle Light / Dark Theme">Theme</button>
+      </div>
+    </header>
+
+    <!-- Main Navigation & Omnibox Bar -->
+    <nav id="nav-bar">
+      <div class="nav-controls">
+        <button id="btn-back" class="icon-btn" title="Back">&#8592;</button>
+        <button id="btn-forward" class="icon-btn" title="Forward">&#8594;</button>
+        <button id="btn-reload" class="icon-btn" title="Reload (Ctrl+R)">&#8635;</button>
+        <button id="btn-home" class="icon-btn" title="Start Page">&#8962;</button>
+      </div>
+
+      <form id="omnibox-form" autocomplete="off">
+        <span id="omnibox-lock-indicator" class="lock-pill" title="Connection status">V</span>
+        <input
+          id="omnibox-input"
+          type="text"
+          spellcheck="false"
+          placeholder="Search the web or enter URL..."
+          aria-label="Address and search bar"
+        />
+        <button type="button" id="btn-bookmark" class="omni-inline-btn" title="Bookmark this page">&#9734;</button>
+      </form>
+
+      <div class="tool-controls">
+        <button id="btn-shield" class="pill-btn shield-on" title="Ad & Tracker Blocker">
+          <span>Shield</span>
+          <span id="shield-count" class="badge">0</span>
+        </button>
+        <button id="btn-media-grabber" class="pill-btn accent-btn" title="Download Videos & Full-Size Images from Page">
+          <span>Media</span>
+          <span id="media-count" class="badge">0</span>
+        </button>
+        <button id="btn-downloads" class="pill-btn" title="Downloads (Ctrl+J)">Downloads</button>
+        <button id="btn-pdf-tools" class="pill-btn" title="PDF Viewer & Converter">PDF</button>
+        <button id="btn-speedtest" class="pill-btn" title="Built-in Internet Speed Test">Speed</button>
+        <button id="btn-pw-vault" class="pill-btn" title="3-Layer Encrypted Password Vault">Passwords</button>
+        <button id="btn-settings" class="icon-btn" title="Settings & History">&#9881;</button>
+      </div>
+    </nav>
+
+    <!-- All-in-One Docked Apps Bar -->
+    <div id="apps-bar">
+      <span class="apps-label">Apps Hub</span>
+      <button class="app-chip" data-app-url="https://www.instagram.com/" data-app-title="Instagram">Instagram</button>
+      <button class="app-chip" data-app-url="https://web.whatsapp.com/" data-app-title="WhatsApp Web">WhatsApp</button>
+      <button class="app-chip" data-app-url="https://open.spotify.com/" data-app-title="Spotify">Spotify</button>
+      <button class="app-chip" data-app-url="https://www.netflix.com/" data-app-title="Netflix">Netflix</button>
+      <button class="app-chip" data-app-url="https://www.primevideo.com/" data-app-title="Prime Video">Prime Video</button>
+      <div class="apps-spacer"></div>
+      <button id="btn-open-local-video" class="app-chip subtle-chip">Play Local Video/Audio</button>
+      <button id="btn-open-local-image" class="app-chip subtle-chip">View Local Image</button>
+      <button id="btn-open-local-pdf" class="app-chip subtle-chip">Open Local PDF</button>
+    </div>
+
+    <!-- Main Browser Workspace -->
+    <main id="workspace">
+      <section id="primary-pane" class="pane">
+        <div id="webview-host" class="webview-host"></div>
+
+        <!-- Start Page (Shown when active tab is velo://newtab) -->
+        <div id="start-page" class="start-page hidden">
+          <div class="start-card">
+            <h1 class="start-title">Velo Browser</h1>
+            <p class="start-subtitle">Private Windows Browser &bull; 3-Layer Encrypted Vault &bull; Universal Media Downloader</p>
+            <form id="start-search-form" class="start-search" autocomplete="off">
+              <input id="start-search-input" type="text" placeholder="Search or enter website address..." />
+              <button type="submit" class="primary-btn">Go</button>
+            </form>
+            <div class="start-section-header">
+              <h2>Quick Bookmarks</h2>
+            </div>
+            <div id="bookmarks-grid" class="bookmarks-grid"></div>
+            <div class="start-section-header">
+              <h2>Built-In Tools</h2>
+            </div>
+            <div class="tools-quick-grid">
+              <button class="tool-tile" data-open-modal="pdf">
+                <strong>PDF Viewer &amp; Converter</strong>
+                <span>View PDFs, export webpages or images to PDF</span>
+              </button>
+              <button class="tool-tile" data-open-modal="speedtest">
+                <strong>Internet Speed Test</strong>
+                <span>Live Ping, Jitter, Download &amp; Upload Mbps</span>
+              </button>
+              <button class="tool-tile" data-open-modal="passwords">
+                <strong>3-Layer Password Vault</strong>
+                <span>AES-256-GCM + CBC-HMAC + PBKDF2 210k</span>
+              </button>
+              <button class="tool-tile" data-open-modal="downloads">
+                <strong>Media &amp; Download Manager</strong>
+                <span>Videos, Full-Size Images, PDFs &amp; Explorer</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Floating Save Media FAB -->
+        <button id="fab-save-media" class="fab hidden" title="Save detected videos or full-size images">
+          <span id="fab-media-label">Save Media</span>
+        </button>
+      </section>
+
+      <!-- Secondary Split-Screen Pane -->
+      <section id="split-pane" class="pane hidden">
+        <div class="split-bar">
+          <input id="split-url-input" type="text" placeholder="Split-screen URL (e.g. https://web.whatsapp.com)" />
+          <button id="btn-split-go" class="small-btn">Go</button>
+          <button id="btn-split-close" class="small-btn danger-btn">Close</button>
+        </div>
+        <div id="split-webview-host" class="webview-host"></div>
+      </section>
+    </main>
+
+    <!-- Toast Container -->
+    <div id="toast-host" aria-live="polite"></div>
+
+    <!-- ================= MODALS ================= -->
+
+    <!-- 1. Page Media & Full-Size Image Downloader Modal -->
+    <div id="modal-media" class="modal-backdrop hidden">
+      <div class="modal-window wide-modal">
+        <div class="modal-header">
+          <div>
+            <h2>Universal Video &amp; Full-Size Image Downloader</h2>
+            <p class="modal-sub">Automatically detected videos, audio streams, and full-resolution images on this page</p>
+          </div>
+          <div class="header-actions">
+            <button id="btn-rescan-media" class="small-btn">Rescan Page</button>
+            <button class="icon-btn modal-close" data-close="modal-media">&times;</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div class="inline-row">
+            <label for="image-format-select" class="field-label">Image Save Format:</label>
+            <select id="image-format-select" class="select-input">
+              <option value="original">Original (Full Size)</option>
+              <option value="png">PNG (Lossless)</option>
+              <option value="jpeg">JPEG (95% Quality)</option>
+              <option value="webp">WebP (High Efficiency)</option>
+              <option value="pdf">PDF Document</option>
+            </select>
+            <input id="manual-media-url" type="text" class="text-input flex-1" placeholder="Or paste any direct video/image/file URL to download..." />
+            <button id="btn-download-manual" class="primary-btn">Download URL</button>
+          </div>
+          <h3 class="section-label">Videos &amp; Audio Streams</h3>
+          <div id="detected-videos-list" class="item-list"></div>
+          <h3 class="section-label">Full-Size Images on Page</h3>
+          <div id="detected-images-grid" class="media-images-grid"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Downloads Manager Modal -->
+    <div id="modal-downloads" class="modal-backdrop hidden">
+      <div class="modal-window wide-modal">
+        <div class="modal-header">
+          <div>
+            <h2>Downloads</h2>
+            <p class="modal-sub">Saved directly to your Windows Downloads\Velo folder</p>
+          </div>
+          <div class="header-actions">
+            <button id="btn-open-downloads-folder" class="small-btn">Open Folder</button>
+            <button class="icon-btn modal-close" data-close="modal-downloads">&times;</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div id="downloads-list" class="item-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Built-in Video & Audio Player Modal -->
+    <div id="modal-player" class="modal-backdrop hidden">
+      <div class="modal-window wide-modal">
+        <div class="modal-header">
+          <div>
+            <h2 id="player-title">Velo Media Player</h2>
+            <p class="modal-sub" id="player-subtitle">Play MP4, WebM, MKV, MOV, MP3, WAV, OGG &amp; M4A</p>
+          </div>
+          <div class="header-actions">
+            <button id="btn-player-pick" class="small-btn">Open File</button>
+            <button class="icon-btn modal-close" data-close="modal-player">&times;</button>
+          </div>
+        </div>
+        <div class="modal-body player-body">
+          <video id="velo-video-el" class="media-stage" controls playsinline></video>
+          <audio id="velo-audio-el" class="audio-stage hidden" controls></audio>
+          <div class="player-toolbar">
+            <label for="player-speed-select" class="field-label">Speed:</label>
+            <select id="player-speed-select" class="select-input">
+              <option value="0.5">0.5x</option>
+              <option value="0.75">0.75x</option>
+              <option value="1" selected>1.0x</option>
+              <option value="1.25">1.25x</option>
+              <option value="1.5">1.5x</option>
+              <option value="2">2.0x</option>
+            </select>
+            <button id="btn-player-loop" class="small-btn">Loop: Off</button>
+            <button id="btn-player-pip" class="small-btn">Picture-in-Picture</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. Built-in Full-Size Image Viewer Modal -->
+    <div id="modal-image" class="modal-backdrop hidden">
+      <div class="modal-window wide-modal">
+        <div class="modal-header">
+          <div>
+            <h2 id="image-viewer-title">Velo Image Viewer</h2>
+            <p class="modal-sub" id="image-viewer-meta">Full-resolution local image preview</p>
+          </div>
+          <div class="header-actions">
+            <button id="btn-img-zoom-out" class="small-btn">-</button>
+            <button id="btn-img-zoom-reset" class="small-btn">100%</button>
+            <button id="btn-img-zoom-in" class="small-btn">+</button>
+            <button id="btn-img-rotate" class="small-btn">Rotate 90&deg;</button>
+            <button id="btn-img-to-pdf" class="small-btn">Save as PDF</button>
+            <button class="icon-btn modal-close" data-close="modal-image">&times;</button>
+          </div>
+        </div>
+        <div class="modal-body image-stage-body">
+          <img id="velo-image-el" alt="Viewed image" />
+        </div>
+      </div>
+    </div>
+
+    <!-- 5. PDF Viewer & Converter Modal -->
+    <div id="modal-pdf" class="modal-backdrop hidden">
+      <div class="modal-window wide-modal tall-modal">
+        <div class="modal-header">
+          <div>
+            <h2 id="pdf-viewer-title">PDF Viewer &amp; Converter</h2>
+            <p class="modal-sub">Open local PDFs, save the active webpage as PDF, or combine images into a PDF</p>
+          </div>
+          <div class="header-actions">
+            <button id="btn-pdf-open-local" class="small-btn">Open PDF</button>
+            <button id="btn-pdf-from-page" class="primary-btn">Current Page &rarr; PDF</button>
+            <button id="btn-pdf-from-images" class="small-btn">Images &rarr; PDF</button>
+            <button class="icon-btn modal-close" data-close="modal-pdf">&times;</button>
+          </div>
+        </div>
+        <div class="modal-body pdf-body">
+          <div id="pdf-empty-state" class="empty-state">
+            <p>No PDF loaded yet. Click <strong>Open PDF</strong>, <strong>Current Page &rarr; PDF</strong>, or <strong>Images &rarr; PDF</strong>.</p>
+          </div>
+          <iframe id="pdf-embed-frame" class="pdf-frame hidden" title="Velo PDF Viewer"></iframe>
+        </div>
+      </div>
+    </div>
+
+    <!-- 6. Internet Speed Test Meter Modal -->
+    <div id="modal-speedtest" class="modal-backdrop hidden">
+      <div class="modal-window medium-modal">
+        <div class="modal-header">
+          <div>
+            <h2>Internet Speed Test</h2>
+            <p class="modal-sub">Real-time HTTPS Ping, Jitter, Download &amp; Upload measurement</p>
+          </div>
+          <button class="icon-btn modal-close" data-close="modal-speedtest">&times;</button>
+        </div>
+        <div class="modal-body speed-body">
+          <canvas id="speed-gauge-canvas" width="320" height="200"></canvas>
+          <div id="speed-phase-label" class="speed-phase">Ready to test</div>
+          <div class="speed-metrics-grid">
+            <div class="metric-box">
+              <span class="metric-label">Ping</span>
+              <strong id="metric-ping">-- ms</strong>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Jitter</span>
+              <strong id="metric-jitter">-- ms</strong>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Download</span>
+              <strong id="metric-down">-- Mbps</strong>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Upload</span>
+              <strong id="metric-up">-- Mbps</strong>
+            </div>
+          </div>
+          <div class="speed-actions">
+            <button id="btn-start-speedtest" class="primary-btn">Start Speed Test</button>
+            <button id="btn-cancel-speedtest" class="small-btn danger-btn hidden">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 7. 3-Layer Encrypted Password Vault Modal -->
+    <div id="modal-passwords" class="modal-backdrop hidden">
+      <div class="modal-window wide-modal">
+        <div class="modal-header">
+          <div>
+            <h2>3-Layer Encrypted Password Vault</h2>
+            <p class="modal-sub" id="pw-crypto-badge">PBKDF2 210,000 &bull; Ephemeral DEK AES-256-GCM &bull; CBC-HMAC &bull; Outer GCM Seal</p>
+          </div>
+          <div class="header-actions">
+            <button id="btn-pw-lock" class="small-btn danger-btn hidden">Lock Vault</button>
+            <button class="icon-btn modal-close" data-close="modal-passwords">&times;</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <!-- Locked / Setup State -->
+          <div id="pw-auth-view" class="auth-card">
+            <h3 id="pw-auth-heading">Unlock Password Vault</h3>
+            <p id="pw-auth-desc" class="modal-sub">Screen capture protection is enabled while this vault is open.</p>
+            <form id="pw-auth-form" class="stacked-form" autocomplete="off">
+              <input id="pw-master-input" type="password" class="text-input" placeholder="Enter Master Passphrase (min 6 chars)" required />
+              <input id="pw-master-confirm" type="password" class="text-input hidden" placeholder="Confirm Master Passphrase" />
+              <button type="submit" id="pw-auth-submit" class="primary-btn">Unlock</button>
+            </form>
+          </div>
+
+          <!-- Unlocked State -->
+          <div id="pw-unlocked-view" class="hidden">
+            <form id="pw-add-form" class="pw-grid-form" autocomplete="off">
+              <input id="pw-site-name" type="text" class="text-input" placeholder="Site Name (e.g. GitHub)" required />
+              <input id="pw-site-url" type="text" class="text-input" placeholder="Website URL" />
+              <input id="pw-username" type="text" class="text-input" placeholder="Username / Email" required />
+              <input id="pw-secret" type="password" class="text-input" placeholder="Password" required />
+              <button type="submit" class="primary-btn">Encrypt &amp; Save</button>
+            </form>
+            <div id="pw-entries-list" class="item-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 8. Stealth Secret Media Vault Modal (Accessed ONLY via Omnibox Secret Code) -->
+    <div id="modal-secret-vault" class="modal-backdrop hidden">
+      <div class="modal-window wide-modal">
+        <div class="modal-header">
+          <div>
+            <h2>Secret Media Vault (AES-256-GCM Encrypted)</h2>
+            <p class="modal-sub" id="vault-status-note">Original files are encrypted inside Velo and deleted from Windows Explorer.</p>
+          </div>
+          <div class="header-actions">
+            <button id="btn-vault-hide-files" class="primary-btn">+ Hide Files</button>
+            <button id="btn-vault-lock" class="small-btn danger-btn">Lock &amp; Wipe Preview</button>
+            <button class="icon-btn modal-close" data-close="modal-secret-vault">&times;</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div class="inline-row space-between">
+            <div class="filter-pills" id="vault-filter-bar">
+              <button class="filter-chip active" data-vault-filter="all">All</button>
+              <button class="filter-chip" data-vault-filter="video">Videos</button>
+              <button class="filter-chip" data-vault-filter="image">Images</button>
+              <button class="filter-chip" data-vault-filter="pdf">PDFs</button>
+              <button class="filter-chip" data-vault-filter="audio">Audio</button>
+            </div>
+            <form id="vault-code-form" class="inline-row" autocomplete="off">
+              <input id="vault-new-code-input" type="password" class="text-input" placeholder="New secret code (e.g. #7788)" />
+              <button type="submit" class="small-btn">Change Code</button>
+            </form>
+          </div>
+          <div id="vault-items-list" class="item-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 9. Settings & History Modal -->
+    <div id="modal-settings" class="modal-backdrop hidden">
+      <div class="modal-window medium-modal">
+        <div class="modal-header">
+          <div>
+            <h2>Settings &amp; Browsing History</h2>
+            <p class="modal-sub">Customize Velo Browser for Windows</p>
+          </div>
+          <button class="icon-btn modal-close" data-close="modal-settings">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="setting-row">
+            <div>
+              <strong>Ad &amp; Tracker Shield</strong>
+              <p class="modal-sub">Blocks ad networks and tracking beacons at network level</p>
+            </div>
+            <input id="setting-adblock" type="checkbox" checked />
+          </div>
+          <div class="setting-row">
+            <div>
+              <strong>Show All-in-One Apps Bar</strong>
+              <p class="modal-sub">Quick access to Instagram, WhatsApp, Spotify, Netflix &amp; Prime</p>
+            </div>
+            <input id="setting-appsbar" type="checkbox" checked />
+          </div>
+          <div class="setting-row">
+            <div>
+              <strong>Default Search Engine</strong>
+              <p class="modal-sub">Used when typing search queries in the address bar</p>
+            </div>
+            <select id="setting-search-engine" class="select-input">
+              <option value="google">Google</option>
+              <option value="duckduckgo">DuckDuckGo</option>
+              <option value="bing">Bing</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <div>
+              <strong>Stealth Secret Media Vault Tip</strong>
+              <p class="modal-sub">Type your secret code directly in the address bar (default: #0000) to unlock hidden videos, photos, PDFs &amp; audio.</p>
+            </div>
+          </div>
+          <div class="inline-row space-between" style="margin-top: 14px;">
+            <h3 class="section-label" style="margin:0;">Recent History</h3>
+            <button id="btn-clear-history" class="small-btn danger-btn">Clear History</button>
+          </div>
+          <div id="history-list" class="item-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

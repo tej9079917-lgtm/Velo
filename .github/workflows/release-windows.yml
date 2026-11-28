@@ -1,0 +1,94 @@
+name: Build & Release Velo Browser (Windows .exe)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows Installer & Portable .exe
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Prepare 256x256 Windows App Icon
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          New-Item -ItemType Directory -Force -Path "velo-windows\build" | Out-Null
+          $srcPath = Resolve-Path "app\src\main\res\mipmap-xxxhdpi\ic_launcher.png"
+          $dstPath = Join-Path (Resolve-Path "velo-windows\build") "icon.png"
+          $srcImg = [System.Drawing.Image]::FromFile($srcPath)
+          $bmp = New-Object System.Drawing.Bitmap 256, 256
+          $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+          $gfx.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+          $gfx.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+          $gfx.DrawImage($srcImg, 0, 0, 256, 256)
+          $bmp.Save($dstPath, [System.Drawing.Imaging.ImageFormat]::Png)
+          $gfx.Dispose()
+          $bmp.Dispose()
+          $srcImg.Dispose()
+
+      - name: Install dependencies
+        working-directory: velo-windows
+        run: npm install
+
+      - name: Verify syntax & crypto engine
+        working-directory: velo-windows
+        run: |
+          node --check src/crypto-engine.js
+          node --check src/main.js
+          node --check src/preload.js
+          node --check src/renderer/app.js
+
+      - name: Build Windows NSIS Installer & Portable .exe
+        working-directory: velo-windows
+        run: npm run build:win
+
+      - name: Upload Windows .exe Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: VeloBrowser-Windows-x64
+          path: |
+            velo-windows/dist/VeloBrowser-Setup.exe
+            velo-windows/dist/VeloBrowser-Portable.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: win-v1.0.${{ github.run_number }}
+          name: Velo Browser for Windows v1.0.${{ github.run_number }}
+          body: |
+            ## Velo Browser for Windows (x64)
+
+            ### Downloads
+            - **VeloBrowser-Setup.exe** — Full Windows installer with Start Menu & Desktop shortcuts plus `.pdf`, `.mp4`, `.webm`, `.mkv`, `.jpg`, `.jpeg`, `.png`, `.webp` file associations.
+            - **VeloBrowser-Portable.exe** — Standalone single-file executable requiring no installation.
+
+            ### Highlights
+            - Multi-tab & Split-Screen Chromium browsing with Ad & Tracker Shield
+            - All-in-One Apps Bar (Instagram, WhatsApp Web, Spotify, Netflix, Prime Video)
+            - Universal Video & Full-Size Image Downloader (`Original`, `PNG`, `JPEG`, `WebP`, `PDF`)
+            - Built-in Video/Audio Player, Image Viewer, PDF Viewer & Webpage/Images-to-PDF Converter
+            - Real-time Internet Speed Test Meter (Ping, Jitter, Download & Upload Mbps)
+            - 3-Layer Multi-Layer Encrypted Password Vault (`MLV2:`)
+            - Stealth Secret Media Vault (type `#0000` in the address bar on first run to open and customize)
+          files: |
+            velo-windows/dist/VeloBrowser-Setup.exe
+            velo-windows/dist/VeloBrowser-Portable.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -17,3 +17,6 @@ local.properties
 .env
 debug.keystore
 *-debug.log
+velo-windows/node_modules/
+velo-windows/dist/
+
