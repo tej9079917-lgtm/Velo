@@ -34,6 +34,11 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 
+# Preserve WebView @JavascriptInterface methods (used for blob: downloads)
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+
 # Strip verbose/debug logging calls in release builds for faster startup & smaller APK
 -assumenosideeffects class android.util.Log {
     public static boolean isLoggable(java.lang.String, int);

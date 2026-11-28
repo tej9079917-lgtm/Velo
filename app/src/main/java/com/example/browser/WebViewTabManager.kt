@@ -8,7 +8,9 @@ import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
+import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -16,6 +18,7 @@ import android.webkit.WebSettings
 import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.annotation.Keep
 import androidx.core.net.toUri
 import org.json.JSONArray
 import org.json.JSONObject
@@ -31,7 +34,24 @@ data class TabWebCallbacks(
     val onInsecureHttpIntercepted: (tabId: String, originalHttpUrl: String) -> Unit,
     val onNetworkRequestLogged: (NetworkRequestLog) -> Unit,
     val onFocusDistractionBlocked: (tabId: String, host: String) -> Unit,
-    val onVideoDetected: (tabId: String, media: DetectedVideoMedia) -> Unit = { _, _ -> }
+    val onVideoDetected: (tabId: String, media: DetectedVideoMedia) -> Unit = { _, _ -> },
+    val onDownloadRequested: (
+        tabId: String,
+        url: String,
+        userAgent: String,
+        contentDisposition: String,
+        mimeType: String,
+        referer: String?
+    ) -> Unit = { _, _, _, _, _, _ -> },
+    val onInlineDataDownload: (
+        fileName: String,
+        mimeType: String,
+        base64Data: String
+    ) -> Unit = { _, _, _ -> },
+    val onImageLongPressed: (
+        imageUrl: String,
+        referer: String?
+    ) -> Unit = { _, _ -> }
 )
 
 /**
@@ -139,6 +159,91 @@ class WebViewTabManager(
                 }
             }
 
+            // Minimal, non-privileged bridge strictly for blob: download handoff
+            addJavascriptInterface(
+                VeloBlobDownloadBridge { fileName, mimeType, base64Data ->
+                    mainHandler.post {
+                        callbacks.onInlineDataDownload(fileName, mimeType, base64Data)
+                    }
+                },
+                BLOB_BRIDGE_NAME
+            )
+
+            // Universal WebView Download Listener (handles HTTP/HTTPS, blob:, and data: downloads)
+            setDownloadListener { downloadUrl, userAgent, contentDisposition, mimetype, _ ->
+                val raw = downloadUrl?.trim().orEmpty()
+                if (raw.isEmpty()) return@setDownloadListener
+                val safeMime = mimetype.orEmpty()
+                val safeDisposition = contentDisposition.orEmpty()
+                val safeUa = userAgent.orEmpty().ifBlank { settings.userAgentString.orEmpty() }
+                val referer = this.url
+
+                when {
+                    raw.startsWith("data:", ignoreCase = true) -> {
+                        val header = raw.substringAfter("data:").substringBefore(",", "")
+                        val inferredMime = header.substringBefore(";").ifBlank { safeMime.ifBlank { "application/octet-stream" } }
+                        val payload = raw.substringAfter(",", "")
+                        val guessed = try {
+                            URLUtil.guessFileName("velo_download", safeDisposition, inferredMime)
+                        } catch (_: Exception) {
+                            "velo_download"
+                        }
+                        if (payload.isNotBlank()) {
+                            callbacks.onInlineDataDownload(guessed, inferredMime, payload)
+                        }
+                    }
+
+                    raw.startsWith("blob:", ignoreCase = true) -> {
+                        val guessed = try {
+                            URLUtil.guessFileName("velo_blob", safeDisposition, safeMime)
+                        } catch (_: Exception) {
+                            "velo_download"
+                        }
+                        val quotedUrl = JSONObject.quote(raw)
+                        val quotedName = JSONObject.quote(guessed)
+                        val quotedMime = JSONObject.quote(safeMime)
+                        val blobFetchJs = """
+                            (function() {
+                                fetch($quotedUrl)
+                                    .then(function(r) { return r.blob(); })
+                                    .then(function(blob) {
+                                        var reader = new FileReader();
+                                        reader.onloadend = function() {
+                                            if (reader.result && window.$BLOB_BRIDGE_NAME) {
+                                                window.$BLOB_BRIDGE_NAME.onBlobReady($quotedName, blob.type || $quotedMime || 'application/octet-stream', String(reader.result));
+                                            }
+                                        };
+                                        reader.readAsDataURL(blob);
+                                    })
+                                    .catch(function(){});
+                            })();
+                        """.trimIndent()
+                        evaluateJavascript(blobFetchJs, null)
+                    }
+
+                    raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true) -> {
+                        callbacks.onDownloadRequested(tab.id, raw, safeUa, safeDisposition, safeMime, referer)
+                    }
+                }
+            }
+
+            // Long-press on webpage images -> prompt to download or open in Velo Image Viewer
+            setOnLongClickListener {
+                val hit = hitTestResult
+                val extra = hit.extra?.trim().orEmpty()
+                val isImage = hit.type == WebView.HitTestResult.IMAGE_TYPE ||
+                    hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+                if (isImage && (extra.startsWith("http://", ignoreCase = true) ||
+                        extra.startsWith("https://", ignoreCase = true) ||
+                        extra.startsWith("data:image/", ignoreCase = true))
+                ) {
+                    callbacks.onImageLongPressed(extra, this.url)
+                    true
+                } else {
+                    false
+                }
+            }
+
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     val uri = request?.url ?: return false
@@ -153,6 +258,19 @@ class WebViewTabManager(
                     }
                     if (scheme == "http" && httpsOnlyEnabled && !httpBypassUrls.contains(uri.toString())) {
                         callbacks.onInsecureHttpIntercepted(tab.id, uri.toString())
+                        return true
+                    }
+                    // Direct PDF links: Android WebView cannot render PDFs inline; download & open in Velo PDF Viewer
+                    val pathLower = uri.path?.lowercase().orEmpty()
+                    if ((scheme == "http" || scheme == "https") && pathLower.endsWith(".pdf")) {
+                        callbacks.onDownloadRequested(
+                            tab.id,
+                            uri.toString(),
+                            view?.settings?.userAgentString.orEmpty(),
+                            "",
+                            "application/pdf",
+                            view?.url
+                        )
                         return true
                     }
                     return false
@@ -620,5 +738,26 @@ class WebViewTabManager(
         keys.forEach { destroyTab(it, wasPrivate = false) }
         currentHosts.clear()
         httpBypassUrls.clear()
+    }
+
+    @Keep
+    private class VeloBlobDownloadBridge(
+        private val onReady: (fileName: String, mimeType: String, base64Data: String) -> Unit
+    ) {
+        @JavascriptInterface
+        fun onBlobReady(fileName: String?, mimeType: String?, dataUrl: String?) {
+            val payload = dataUrl?.trim().orEmpty()
+            if (payload.isBlank() || payload.length > MAX_BRIDGE_CHARS) return
+            onReady(
+                fileName?.trim().orEmpty().ifBlank { "velo_download" },
+                mimeType?.trim().orEmpty().ifBlank { "application/octet-stream" },
+                payload
+            )
+        }
+    }
+
+    companion object {
+        private const val BLOB_BRIDGE_NAME = "VeloBlobBridge"
+        private const val MAX_BRIDGE_CHARS = 40 * 1024 * 1024
     }
 }

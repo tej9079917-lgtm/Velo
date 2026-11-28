@@ -235,6 +235,17 @@ data class SecretMediaItem(
     val addedAtMillis: Long
 )
 
+data class ExternalOpenRequest(
+    val uriString: String,
+    val mimeType: String?
+)
+
+data class ImageViewerRequest(
+    val title: String,
+    val source: String,
+    val isContentUri: Boolean = false
+)
+
 enum class ActiveOverlay {
     NONE,
     TAB_SWITCHER,
@@ -252,5 +263,6 @@ enum class ActiveOverlay {
     PDF_TOOLS,
     SPEED_TEST,
     SECRET_MEDIA_VAULT,
-    SECRET_VAULT_SETUP
+    SECRET_VAULT_SETUP,
+    IMAGE_VIEWER
 }

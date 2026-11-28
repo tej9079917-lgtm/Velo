@@ -15,8 +15,10 @@ import com.example.browser.BrowserSettings
 import com.example.browser.BrowserTab
 import com.example.browser.DetectedVideoMedia
 import com.example.browser.DownloadedMediaItem
+import com.example.browser.ExternalOpenRequest
 import com.example.browser.FindInPageState
 import com.example.browser.FocusSessionState
+import com.example.browser.ImageViewerRequest
 import com.example.browser.NetworkRequestLog
 import com.example.browser.OfflinePageArchiver
 import com.example.browser.PdfDocumentItem
@@ -240,6 +242,8 @@ class BrowserViewModel(
 
     private val _videoPlayerRequest = MutableStateFlow<VideoPlayerRequest?>(null)
     val videoPlayerRequest: StateFlow<VideoPlayerRequest?> = _videoPlayerRequest.asStateFlow()
+    private val _imageViewerRequest = MutableStateFlow<ImageViewerRequest?>(null)
+    val imageViewerRequest: StateFlow<ImageViewerRequest?> = _imageViewerRequest.asStateFlow()
     private var returnOverlayAfterMedia: ActiveOverlay = ActiveOverlay.NONE
 
     // --- PDF VIEWER & CONVERTER STATE ---
@@ -1571,25 +1575,52 @@ class BrowserViewModel(
     }
 
     fun startVideoDownload(url: String, title: String, qualityLabel: String = "HD") {
+        startWebFileDownload(
+            url = url,
+            suggestedTitle = title,
+            qualityLabel = qualityLabel,
+            userAgent = "",
+            contentDisposition = "",
+            mimeType = "",
+            referer = activeTab.value.url.takeIf { it.startsWith("http") },
+            autoOpenIfPdf = false
+        )
+    }
+
+    fun startWebFileDownload(
+        url: String,
+        suggestedTitle: String = "",
+        qualityLabel: String = "File",
+        userAgent: String = "",
+        contentDisposition: String = "",
+        mimeType: String = "",
+        referer: String? = null,
+        autoOpenIfPdf: Boolean = true
+    ) {
         val cleanUrl = url.trim()
         if (!cleanUrl.startsWith("http://", ignoreCase = true) && !cleanUrl.startsWith("https://", ignoreCase = true)) {
-            showTransientBanner("Enter a valid HTTP or HTTPS video URL.")
+            showTransientBanner("Enter a valid HTTP or HTTPS download URL.")
             return
         }
         downloadJob?.cancel()
         videoDownloadEngine.cancelActiveDownload()
-        val displayTitle = title.trim().ifBlank { VideoDownloadEngine.deriveTitleFromUrl(cleanUrl) }
+        val displayTitle = suggestedTitle.trim().ifBlank { VideoDownloadEngine.deriveTitleFromUrl(cleanUrl) }
         _activeDownload.value = ActiveDownloadProgress(
             url = cleanUrl,
             title = displayTitle,
             downloadedBytes = 0L,
             totalBytes = -1L
         )
+        showTransientBanner("Downloading \"$displayTitle\"...")
         downloadJob = viewModelScope.launch {
-            val result = videoDownloadEngine.downloadVideo(
+            val result = videoDownloadEngine.downloadAnyFile(
                 rawUrl = cleanUrl,
-                title = displayTitle,
+                suggestedTitle = suggestedTitle,
                 qualityLabel = qualityLabel,
+                contentDisposition = contentDisposition,
+                hintMimeType = mimeType,
+                referer = referer,
+                userAgent = userAgent,
                 onProgress = { downloaded, total ->
                     _activeDownload.value = ActiveDownloadProgress(
                         url = cleanUrl,
@@ -1601,25 +1632,226 @@ class BrowserViewModel(
             )
             _activeDownload.value = null
             result.onSuccess { done ->
-                downloadedMediaDao.upsert(
-                    DownloadedMediaEntity(
-                        id = done.id,
-                        title = done.title,
-                        sourceUrl = done.sourceUrl,
-                        localPath = done.localPath,
-                        mimeType = done.mimeType,
-                        formatLabel = done.formatLabel,
-                        qualityLabel = done.qualityLabel,
-                        byteSize = done.byteSize
-                    )
-                )
-                val mb = done.byteSize / (1024.0 * 1024.0)
-                showTransientBanner("Downloaded \"${done.title}\" (${"%.1f".format(mb)} MB).")
+                handleCompletedDownload(done, autoOpenIfPdf = autoOpenIfPdf)
             }.onFailure { err ->
                 if (err !is CancellationException) {
-                    showTransientBanner(err.localizedMessage ?: "Video download failed.")
+                    showTransientBanner(err.localizedMessage ?: "Download failed.")
                 }
             }
+        }
+    }
+
+    fun saveInlineDataDownload(fileName: String, mimeType: String, base64Data: String) {
+        viewModelScope.launch {
+            showTransientBanner("Saving \"$fileName\"...")
+            val result = videoDownloadEngine.saveInlineBase64File(fileName, mimeType, base64Data)
+            result.onSuccess { done ->
+                handleCompletedDownload(done, autoOpenIfPdf = true)
+            }.onFailure { err ->
+                showTransientBanner(err.localizedMessage ?: "Failed to save inline download.")
+            }
+        }
+    }
+
+    private suspend fun handleCompletedDownload(
+        done: com.example.media.DownloadedVideoResult,
+        autoOpenIfPdf: Boolean
+    ) {
+        downloadedMediaDao.upsert(
+            DownloadedMediaEntity(
+                id = done.id,
+                title = done.title,
+                sourceUrl = done.sourceUrl,
+                localPath = done.localPath,
+                mimeType = done.mimeType,
+                formatLabel = done.formatLabel,
+                qualityLabel = done.qualityLabel,
+                byteSize = done.byteSize
+            )
+        )
+        val sizeStr = if (done.byteSize >= 1024L * 1024L) {
+            "${"%.1f".format(done.byteSize / (1024.0 * 1024.0))} MB"
+        } else {
+            "${(done.byteSize / 1024L).coerceAtLeast(1L)} KB"
+        }
+        val publicNote = if (done.savedToPublicDownloads) " • Saved to Downloads/Velo" else ""
+
+        if (done.mimeType.equals("application/pdf", ignoreCase = true) ||
+            done.formatLabel.equals("PDF", ignoreCase = true)
+        ) {
+            pdfEngine.importPdfFromFile(java.io.File(done.localPath), done.title)
+                .onSuccess { pdfDoc ->
+                    refreshSavedPdfs()
+                    if (autoOpenIfPdf) {
+                        _activePdfDocument.value = pdfDoc
+                        _activeOverlay.value = ActiveOverlay.PDF_TOOLS
+                    }
+                    showTransientBanner("Downloaded PDF \"${pdfDoc.title}\" ($sizeStr)$publicNote")
+                }
+                .onFailure {
+                    showTransientBanner("Downloaded \"${done.title}\" ($sizeStr)$publicNote")
+                }
+        } else {
+            showTransientBanner("Downloaded \"${done.title}\" ($sizeStr)$publicNote")
+        }
+    }
+
+    fun openDownloadedItem(item: DownloadedMediaItem) {
+        val mime = item.mimeType.lowercase()
+        val fmt = item.formatLabel.uppercase()
+        when {
+            mime == "application/pdf" || fmt == "PDF" || item.localPath.endsWith(".pdf", ignoreCase = true) -> {
+                viewModelScope.launch {
+                    val file = java.io.File(item.localPath)
+                    pdfEngine.importPdfFromFile(file, item.title)
+                        .onSuccess { pdfDoc ->
+                            refreshSavedPdfs()
+                            openPdfDocument(pdfDoc, returnTo = ActiveOverlay.VIDEO_DOWNLOADER)
+                        }
+                        .onFailure {
+                            showTransientBanner("Unable to open PDF file.")
+                        }
+                }
+            }
+            mime.startsWith("image/") || fmt in setOf("PNG", "JPG", "WEBP", "GIF", "IMAGE") -> {
+                openImageViewer(
+                    request = ImageViewerRequest(
+                        title = item.title,
+                        source = item.localPath,
+                        isContentUri = false
+                    ),
+                    returnTo = ActiveOverlay.VIDEO_DOWNLOADER
+                )
+            }
+            mime.startsWith("audio/") || fmt in setOf("MP3", "M4A", "WAV", "OGG", "FLAC", "AUDIO") -> {
+                openVideoPlayer(
+                    request = VideoPlayerRequest(
+                        title = item.title,
+                        primarySource = item.localPath,
+                        isLocalFile = true,
+                        isAudioOnly = true
+                    ),
+                    returnTo = ActiveOverlay.VIDEO_DOWNLOADER
+                )
+            }
+            mime.startsWith("video/") || fmt in setOf("MP4", "WEBM", "MKV", "MOV", "M4V", "3GP", "HLS", "HLS/TS", "VIDEO") -> {
+                openVideoPlayer(
+                    request = VideoPlayerRequest(
+                        title = item.title,
+                        primarySource = item.localPath,
+                        isLocalFile = true,
+                        isAudioOnly = false
+                    ),
+                    returnTo = ActiveOverlay.VIDEO_DOWNLOADER
+                )
+            }
+            else -> {
+                showTransientBanner("Saved in Downloads/Velo (${item.title}).")
+            }
+        }
+    }
+
+    fun openExternalFile(request: ExternalOpenRequest) {
+        val uri = try {
+            request.uriString.toUri()
+        } catch (_: Exception) {
+            showTransientBanner("Unable to open selected file.")
+            return
+        }
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        val rawMime = request.mimeType?.lowercase().orEmpty()
+        val displayName = resolveUriDisplayName(uri)
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.take(64)
+            ?: "External File"
+        val nameLower = displayName.lowercase()
+        val pathLower = uri.path?.lowercase().orEmpty()
+
+        val isPdf = rawMime == "application/pdf" || nameLower.endsWith(".pdf") || pathLower.endsWith(".pdf")
+        val isVideo = rawMime.startsWith("video/") ||
+            listOf(".mp4", ".mkv", ".webm", ".mov", ".m4v", ".3gp", ".ts", ".m3u8").any { nameLower.endsWith(it) || pathLower.endsWith(it) }
+        val isImage = rawMime.startsWith("image/") ||
+            listOf(".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic").any { nameLower.endsWith(it) || pathLower.endsWith(it) }
+        val isAudio = rawMime.startsWith("audio/") ||
+            listOf(".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac").any { nameLower.endsWith(it) || pathLower.endsWith(it) }
+
+        when {
+            isPdf -> {
+                if (scheme == "http" || scheme == "https") {
+                    startWebFileDownload(
+                        url = uri.toString(),
+                        suggestedTitle = displayName.removeSuffix(".pdf"),
+                        mimeType = "application/pdf",
+                        autoOpenIfPdf = true
+                    )
+                } else {
+                    _activeOverlay.value = ActiveOverlay.PDF_TOOLS
+                    importPdfFromUri(uri)
+                }
+            }
+            isVideo -> {
+                openVideoPlayer(
+                    request = VideoPlayerRequest(
+                        title = displayName,
+                        primarySource = uri.toString(),
+                        isLocalFile = scheme != "http" && scheme != "https",
+                        isAudioOnly = false
+                    ),
+                    returnTo = ActiveOverlay.NONE
+                )
+            }
+            isAudio -> {
+                openVideoPlayer(
+                    request = VideoPlayerRequest(
+                        title = displayName,
+                        primarySource = uri.toString(),
+                        isLocalFile = scheme != "http" && scheme != "https",
+                        isAudioOnly = true
+                    ),
+                    returnTo = ActiveOverlay.NONE
+                )
+            }
+            isImage -> {
+                openImageViewer(
+                    request = ImageViewerRequest(
+                        title = displayName,
+                        source = uri.toString(),
+                        isContentUri = scheme == "content"
+                    ),
+                    returnTo = ActiveOverlay.NONE
+                )
+            }
+            else -> {
+                showTransientBanner("Unsupported external file type ($displayName).")
+            }
+        }
+    }
+
+    fun openImageViewer(
+        request: ImageViewerRequest,
+        returnTo: ActiveOverlay = ActiveOverlay.NONE
+    ) {
+        returnOverlayAfterMedia = returnTo
+        _imageViewerRequest.value = request
+        _activeOverlay.value = ActiveOverlay.IMAGE_VIEWER
+    }
+
+    fun closeImageViewer() {
+        _imageViewerRequest.value = null
+        val target = returnOverlayAfterMedia
+        returnOverlayAfterMedia = ActiveOverlay.NONE
+        _activeOverlay.value = target
+    }
+
+    fun hideImageViewerInSecretVault(request: ImageViewerRequest) {
+        if (request.isContentUri || request.source.startsWith("content://") || request.source.startsWith("file://")) {
+            hideUrisInSecretVault(listOf(request.source.toUri()), SecretMediaType.IMAGE)
+        } else {
+            hideLocalFileInSecretVault(
+                filePath = request.source,
+                displayName = request.title,
+                type = SecretMediaType.IMAGE,
+                mimeType = "image/jpeg"
+            )
         }
     }
 
@@ -1628,7 +1860,7 @@ class BrowserViewModel(
         downloadJob?.cancel()
         downloadJob = null
         _activeDownload.value = null
-        showTransientBanner("Video download canceled.")
+        showTransientBanner("Download canceled.")
     }
 
     fun deleteDownloadedMedia(item: DownloadedMediaItem) {

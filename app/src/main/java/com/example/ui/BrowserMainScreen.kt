@@ -61,6 +61,7 @@ import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -108,6 +109,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.browser.ActiveOverlay
 import com.example.browser.BrowserTab
+import com.example.browser.ExternalOpenRequest
 import com.example.browser.FocusSessionState
 import com.example.browser.SecretMediaType
 import com.example.browser.SplitPane
@@ -129,7 +131,9 @@ fun BrowserMainScreen(
     userEmail: String?,
     isInPipMode: Boolean,
     initialExternalUrl: String?,
+    initialExternalFile: ExternalOpenRequest?,
     onConsumeExternalUrl: () -> Unit,
+    onConsumeExternalFile: () -> Unit,
     onEnterPipMode: () -> Unit,
     onSignOut: () -> Unit
 ) {
@@ -169,6 +173,7 @@ fun BrowserMainScreen(
     val downloadedMedia by viewModel.downloadedMedia.collectAsStateWithLifecycle()
     val activeDownload by viewModel.activeDownload.collectAsStateWithLifecycle()
     val videoPlayerRequest by viewModel.videoPlayerRequest.collectAsStateWithLifecycle()
+    val imageViewerRequest by viewModel.imageViewerRequest.collectAsStateWithLifecycle()
     val savedPdfs by viewModel.savedPdfs.collectAsStateWithLifecycle()
     val activePdfDocument by viewModel.activePdfDocument.collectAsStateWithLifecycle()
     val isPdfBusy by viewModel.isPdfBusy.collectAsStateWithLifecycle()
@@ -181,6 +186,8 @@ fun BrowserMainScreen(
     val secretMediaItems by viewModel.secretMediaItems.collectAsStateWithLifecycle()
     val secretImagePreview by viewModel.secretImagePreview.collectAsStateWithLifecycle()
     val backgroundAudioActive by viewModel.backgroundAudioActive.collectAsStateWithLifecycle()
+
+    var longPressedImage by remember { mutableStateOf<Pair<String, String?>?>(null) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     val activity = context as? Activity
@@ -236,6 +243,22 @@ fun BrowserMainScreen(
                 },
                 onVideoDetected = { tabId, media ->
                     viewModel.recordDetectedVideo(tabId, media)
+                },
+                onDownloadRequested = { _, url, userAgent, contentDisposition, mimeType, referer ->
+                    viewModel.startWebFileDownload(
+                        url = url,
+                        userAgent = userAgent,
+                        contentDisposition = contentDisposition,
+                        mimeType = mimeType,
+                        referer = referer,
+                        autoOpenIfPdf = true
+                    )
+                },
+                onInlineDataDownload = { fileName, mimeType, base64Data ->
+                    viewModel.saveInlineDataDownload(fileName, mimeType, base64Data)
+                },
+                onImageLongPressed = { imageUrl, referer ->
+                    longPressedImage = imageUrl to referer
                 }
             )
         )
@@ -275,6 +298,14 @@ fun BrowserMainScreen(
                 viewModel.updateTabOnStart(tab.id, resolved)
             }
             onConsumeExternalUrl()
+        }
+    }
+
+    LaunchedEffect(initialExternalFile) {
+        val extFile = initialExternalFile
+        if (extFile != null) {
+            viewModel.openExternalFile(extFile)
+            onConsumeExternalFile()
         }
     }
 
@@ -1700,20 +1731,21 @@ fun BrowserMainScreen(
                         )
                     },
                     onPlayDownloaded = { item ->
-                        viewModel.openVideoPlayer(
-                            request = VideoPlayerRequest(
-                                title = item.title,
-                                primarySource = item.localPath,
-                                isLocalFile = true
-                            ),
-                            returnTo = ActiveOverlay.VIDEO_DOWNLOADER
-                        )
+                        viewModel.openDownloadedItem(item)
                     },
                     onHideDownloadedInVault = { item ->
+                        val lowerMime = item.mimeType.lowercase()
+                        val fmt = item.formatLabel.uppercase()
+                        val mediaType = when {
+                            lowerMime == "application/pdf" || fmt == "PDF" -> SecretMediaType.PDF
+                            lowerMime.startsWith("image/") || fmt in setOf("PNG", "JPG", "WEBP", "GIF", "IMAGE") -> SecretMediaType.IMAGE
+                            lowerMime.startsWith("audio/") || fmt in setOf("MP3", "M4A", "WAV", "OGG", "FLAC", "AUDIO") -> SecretMediaType.AUDIO
+                            else -> SecretMediaType.VIDEO
+                        }
                         viewModel.hideLocalFileInSecretVault(
                             filePath = item.localPath,
                             displayName = item.title,
-                            type = SecretMediaType.VIDEO,
+                            type = mediaType,
                             mimeType = item.mimeType,
                             onOriginalHidden = { viewModel.deleteDownloadedMedia(item) }
                         )
@@ -1833,7 +1865,71 @@ fun BrowserMainScreen(
                         viewModel.setOverlay(ActiveOverlay.NONE)
                     }
                 }
+
+                ActiveOverlay.IMAGE_VIEWER -> {
+                    val imgReq = imageViewerRequest
+                    if (imgReq != null) {
+                        ImageViewerSheet(
+                            request = imgReq,
+                            onConvertToPdf = { uri, title ->
+                                viewModel.setOverlay(ActiveOverlay.PDF_TOOLS)
+                                viewModel.convertImagesToPdf(listOf(uri), title)
+                            },
+                            onHideInSecretVault = { req ->
+                                viewModel.hideImageViewerInSecretVault(req)
+                            },
+                            onDismiss = { viewModel.closeImageViewer() }
+                        )
+                    } else {
+                        viewModel.setOverlay(ActiveOverlay.NONE)
+                    }
+                }
             }
+        }
+
+        // Long-press webpage image download dialog
+        val pendingImg = longPressedImage
+        if (pendingImg != null) {
+            AlertDialog(
+                onDismissRequest = { longPressedImage = null },
+                title = { Text("Image Options") },
+                text = {
+                    Text(
+                        text = "Save this image directly to Downloads/Velo and open it offline anytime.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val (imgUrl, referer) = pendingImg
+                            longPressedImage = null
+                            if (imgUrl.startsWith("data:", ignoreCase = true)) {
+                                val header = imgUrl.substringAfter("data:").substringBefore(",", "")
+                                val mime = header.substringBefore(";").ifBlank { "image/png" }
+                                val ext = mime.substringAfter("/", "png")
+                                val payload = imgUrl.substringAfter(",", "")
+                                viewModel.saveInlineDataDownload("Web_Image.$ext", mime, payload)
+                            } else {
+                                viewModel.startWebFileDownload(
+                                    url = imgUrl,
+                                    mimeType = "image/jpeg",
+                                    referer = referer,
+                                    autoOpenIfPdf = false
+                                )
+                            }
+                        },
+                        modifier = Modifier.testTag("confirm_download_image_button")
+                    ) {
+                        Text("Download Image")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { longPressedImage = null }) {
+                        Text("Cancel")
+                    }
+                }
+            )
         }
     }
 }

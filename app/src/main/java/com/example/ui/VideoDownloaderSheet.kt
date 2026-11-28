@@ -25,9 +25,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.EnhancedEncryption
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VideoFile
@@ -92,12 +97,12 @@ fun VideoDownloaderSheet(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Video Downloader",
+                    text = "Downloads & Video Saver",
                     style = MaterialTheme.typography.headlineSmall,
                     color = MaterialTheme.colorScheme.onBackground
                 )
                 Text(
-                    text = "Save playing web videos & manage offline media",
+                    text = "Saved to Downloads/Velo • Videos, PDFs, images & files",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -305,7 +310,7 @@ fun VideoDownloaderSheet(
             // Downloaded Offline Library
             item {
                 Text(
-                    text = "Saved Videos (${downloadedVideos.size})",
+                    text = "Saved Downloads (${downloadedVideos.size})",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier.padding(top = 8.dp)
@@ -315,7 +320,7 @@ fun VideoDownloaderSheet(
             if (downloadedVideos.isEmpty()) {
                 item {
                     Text(
-                        text = "Downloaded videos appear here for offline playback or 1-tap hiding in your Secret Vault.",
+                        text = "Downloaded videos, PDFs, images, audios, and files appear here and in your phone's Downloads/Velo folder.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -421,6 +426,29 @@ private fun DownloadedVideoCard(
     onHideInVault: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val lowerMime = item.mimeType.lowercase()
+    val fmt = item.formatLabel.uppercase()
+    val isPdf = lowerMime == "application/pdf" || fmt == "PDF"
+    val isImage = lowerMime.startsWith("image/") || fmt in setOf("PNG", "JPG", "WEBP", "GIF", "IMAGE")
+    val isAudio = lowerMime.startsWith("audio/") || fmt in setOf("MP3", "M4A", "WAV", "OGG", "FLAC", "AUDIO")
+    val isVideo = lowerMime.startsWith("video/") || fmt in setOf("MP4", "WEBM", "MKV", "MOV", "M4V", "3GP", "HLS", "HLS/TS", "VIDEO")
+
+    val itemIcon = when {
+        isPdf -> Icons.Default.PictureAsPdf
+        isImage -> Icons.Default.Image
+        isAudio -> Icons.Default.MusicNote
+        isVideo -> Icons.Default.VideoFile
+        else -> Icons.Default.Description
+    }
+    val actionLabel = when {
+        isPdf -> "Open PDF"
+        isImage -> "View Image"
+        isAudio -> "Play Audio"
+        isVideo -> "Play"
+        else -> "Details"
+    }
+    val actionIcon = if (isVideo || isAudio) Icons.Default.PlayArrow else Icons.Default.OpenInNew
+
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(16.dp),
@@ -439,7 +467,7 @@ private fun DownloadedVideoCard(
                         .background(ShieldEmerald.copy(alpha = 0.16f), RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.VideoFile, contentDescription = null, tint = ShieldEmerald)
+                    Icon(itemIcon, contentDescription = null, tint = ShieldEmerald)
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
@@ -448,9 +476,13 @@ private fun DownloadedVideoCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    val mb = item.byteSize / (1024.0 * 1024.0)
+                    val sizeText = if (item.byteSize >= 1024L * 1024L) {
+                        "${"%.1f".format(item.byteSize / (1024.0 * 1024.0))} MB"
+                    } else {
+                        "${(item.byteSize / 1024L).coerceAtLeast(1L)} KB"
+                    }
                     Text(
-                        text = "${item.formatLabel} • ${item.qualityLabel} • ${"%.1f".format(mb)} MB",
+                        text = "${item.formatLabel} • ${item.qualityLabel} • $sizeText",
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = JetBrainsMonoFontFamily,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -458,9 +490,9 @@ private fun DownloadedVideoCard(
                 }
                 IconButton(
                     onClick = onDelete,
-                    modifier = Modifier.size(42.dp).testTag("delete_downloaded_video_${item.id}")
+                    modifier = Modifier.size(48.dp).testTag("delete_downloaded_video_${item.id}")
                 ) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete video", tint = MaterialTheme.colorScheme.error)
+                    Icon(Icons.Default.Delete, contentDescription = "Delete download", tint = MaterialTheme.colorScheme.error)
                 }
             }
 
@@ -469,17 +501,19 @@ private fun DownloadedVideoCard(
                     onClick = onPlay,
                     modifier = Modifier.weight(1f).testTag("play_downloaded_video_${item.id}")
                 ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(actionIcon, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Play")
+                    Text(actionLabel)
                 }
-                OutlinedButton(
-                    onClick = onHideInVault,
-                    modifier = Modifier.weight(1f).testTag("hide_downloaded_video_${item.id}")
-                ) {
-                    Icon(Icons.Default.EnhancedEncryption, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Hide in Vault")
+                if (isPdf || isImage || isAudio || isVideo) {
+                    OutlinedButton(
+                        onClick = onHideInVault,
+                        modifier = Modifier.weight(1f).testTag("hide_downloaded_video_${item.id}")
+                    ) {
+                        Icon(Icons.Default.EnhancedEncryption, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Hide in Vault")
+                    }
                 }
             }
         }

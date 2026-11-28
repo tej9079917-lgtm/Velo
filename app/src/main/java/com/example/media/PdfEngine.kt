@@ -153,6 +153,40 @@ class PdfEngine(private val context: Context) {
         }
     }
 
+    suspend fun importPdfFromFile(sourceFile: File, title: String): Result<PdfDocumentItem> =
+        withContext(Dispatchers.IO) {
+            try {
+                if (!sourceFile.exists() || sourceFile.length() == 0L) {
+                    return@withContext Result.failure(IllegalArgumentException("Downloaded PDF file is missing."))
+                }
+                val cleanTitle = title.removeSuffix(".pdf").removeSuffix(".PDF").trim().ifBlank { "Document" }
+                val outFile = createConfinedPdfFile(cleanTitle)
+                FileInputStream(sourceFile).use { input ->
+                    FileOutputStream(outFile).use { output ->
+                        input.copyTo(output, bufferSize = 16 * 1024)
+                        output.flush()
+                    }
+                }
+                val pageCount = getPageCountInternal(outFile)
+                if (pageCount <= 0) {
+                    outFile.delete()
+                    return@withContext Result.failure(IllegalArgumentException("Downloaded file is not a valid PDF."))
+                }
+                Result.success(
+                    PdfDocumentItem(
+                        id = outFile.nameWithoutExtension,
+                        title = cleanTitle,
+                        filePath = outFile.canonicalPath,
+                        pageCount = pageCount,
+                        byteSize = outFile.length(),
+                        createdAtMillis = outFile.lastModified()
+                    )
+                )
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
     suspend fun convertImagesToPdf(imageUris: List<Uri>, title: String): Result<PdfDocumentItem> =
         withContext(Dispatchers.IO) {
             if (imageUris.isEmpty()) {

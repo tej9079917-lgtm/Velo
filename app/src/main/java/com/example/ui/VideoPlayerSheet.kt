@@ -189,7 +189,7 @@ fun VideoPlayerSheet(
                         .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
                         .build()
                 )
-                if (src.startsWith("content://")) {
+                if (src.startsWith("content://") || src.startsWith("file://")) {
                     mp.setDataSource(context, src.toUri())
                 } else {
                     mp.setDataSource(src)

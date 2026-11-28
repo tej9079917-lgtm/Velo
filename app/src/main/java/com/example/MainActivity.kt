@@ -7,6 +7,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
+import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -24,6 +25,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.browser.ExternalOpenRequest
 import com.example.browser.OfflinePageArchiver
 import com.example.crypto.SecretMediaVaultManager
 import com.example.data.local.LocalPreferencesStore
@@ -49,17 +51,20 @@ import kotlinx.coroutines.flow.flowOf
 class MainActivity : ComponentActivity() {
 
     private var pendingExternalUrl by mutableStateOf<String?>(null)
+    private var pendingExternalFile by mutableStateOf<ExternalOpenRequest?>(null)
     private var isInPipMode by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        captureExternalUrl(intent)
+        captureExternalIntent(intent)
         setContent {
             VeloBrowserApp(
                 pendingExternalUrl = pendingExternalUrl,
+                pendingExternalFile = pendingExternalFile,
                 isInPipMode = isInPipMode,
                 onConsumeExternalUrl = { pendingExternalUrl = null },
+                onConsumeExternalFile = { pendingExternalFile = null },
                 onEnterPipMode = { enterBrowserPipMode() }
             )
         }
@@ -67,7 +72,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        captureExternalUrl(intent)
+        setIntent(intent)
+        captureExternalIntent(intent)
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
@@ -90,21 +96,57 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun captureExternalUrl(intent: Intent?) {
-        if (intent?.action == Intent.ACTION_VIEW) {
-            val dataUrl = intent.dataString
-            if (!dataUrl.isNullOrBlank() && (dataUrl.startsWith("http://") || dataUrl.startsWith("https://"))) {
-                pendingExternalUrl = dataUrl
+    private fun captureExternalIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        val resolvedMime = resolveIntentMimeType(intent, uri)
+
+        when (scheme) {
+            "content", "file" -> {
+                pendingExternalFile = ExternalOpenRequest(
+                    uriString = uri.toString(),
+                    mimeType = resolvedMime
+                )
+            }
+            "http", "https" -> {
+                val pathLower = uri.path?.lowercase().orEmpty()
+                val isDirectMediaOrPdf = resolvedMime == "application/pdf" ||
+                    resolvedMime?.startsWith("video/") == true ||
+                    pathLower.endsWith(".pdf")
+                if (isDirectMediaOrPdf) {
+                    pendingExternalFile = ExternalOpenRequest(
+                        uriString = uri.toString(),
+                        mimeType = resolvedMime ?: if (pathLower.endsWith(".pdf")) "application/pdf" else null
+                    )
+                } else {
+                    pendingExternalUrl = uri.toString()
+                }
             }
         }
+    }
+
+    private fun resolveIntentMimeType(intent: Intent, uri: android.net.Uri): String? {
+        intent.type?.takeIf { it.isNotBlank() && it != "*/*" }?.let { return it }
+        try {
+            contentResolver.getType(uri)?.takeIf { it.isNotBlank() }?.let { return it }
+        } catch (_: Exception) {
+        }
+        val ext = MimeTypeMap.getFileExtensionFromUrl(uri.toString())?.lowercase().orEmpty()
+        if (ext.isNotBlank()) {
+            return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+        }
+        return null
     }
 }
 
 @Composable
 private fun VeloBrowserApp(
     pendingExternalUrl: String?,
+    pendingExternalFile: ExternalOpenRequest?,
     isInPipMode: Boolean,
     onConsumeExternalUrl: () -> Unit,
+    onConsumeExternalFile: () -> Unit,
     onEnterPipMode: () -> Unit
 ) {
     val context = LocalContext.current
@@ -128,7 +170,9 @@ private fun VeloBrowserApp(
             userEmail = user?.email,
             isInPipMode = isInPipMode,
             pendingExternalUrl = pendingExternalUrl,
+            pendingExternalFile = pendingExternalFile,
             onConsumeExternalUrl = onConsumeExternalUrl,
+            onConsumeExternalFile = onConsumeExternalFile,
             onEnterPipMode = onEnterPipMode
         )
     }
@@ -141,7 +185,9 @@ private fun BrowserWorkspaceRoot(
     userEmail: String?,
     isInPipMode: Boolean,
     pendingExternalUrl: String?,
+    pendingExternalFile: ExternalOpenRequest?,
     onConsumeExternalUrl: () -> Unit,
+    onConsumeExternalFile: () -> Unit,
     onEnterPipMode: () -> Unit
 ) {
     val context = LocalContext.current
@@ -197,7 +243,9 @@ private fun BrowserWorkspaceRoot(
             userEmail = userEmail,
             isInPipMode = isInPipMode,
             initialExternalUrl = pendingExternalUrl,
+            initialExternalFile = pendingExternalFile,
             onConsumeExternalUrl = onConsumeExternalUrl,
+            onConsumeExternalFile = onConsumeExternalFile,
             onEnterPipMode = onEnterPipMode,
             onSignOut = { signOutGoogle(context, credentialManager, scope) }
         )
