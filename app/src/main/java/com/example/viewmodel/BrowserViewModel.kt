@@ -254,6 +254,22 @@ class BrowserViewModel(
     val activeDownload: StateFlow<ActiveDownloadProgress?> = _activeDownload.asStateFlow()
     private var downloadJob: Job? = null
 
+    private val _downloaderInitialTab = MutableStateFlow(0)
+    val downloaderInitialTab: StateFlow<Int> = _downloaderInitialTab.asStateFlow()
+
+    fun openDownloadsManager(initialTab: Int = 0) {
+        _downloaderInitialTab.value = initialTab.coerceIn(0, 2)
+        _activeOverlay.value = ActiveOverlay.VIDEO_DOWNLOADER
+    }
+
+    fun hasPublicStorageAccess(): Boolean = VideoDownloadEngine.hasPublicDownloadsAccess(appContext)
+
+    fun openSystemDownloadsFolder() {
+        VeloDownloadManagerWrapper.openSystemDownloadsFolder(appContext).onFailure {
+            showTransientBanner("Files are saved in your phone's Downloads/Velo folder.")
+        }
+    }
+
     private val _videoPlayerRequest = MutableStateFlow<VideoPlayerRequest?>(null)
     val videoPlayerRequest: StateFlow<VideoPlayerRequest?> = _videoPlayerRequest.asStateFlow()
     private val _imageViewerRequest = MutableStateFlow<ImageViewerRequest?>(null)
@@ -1755,7 +1771,13 @@ class BrowserViewModel(
         } else {
             "${(done.byteSize / 1024L).coerceAtLeast(1L)} KB"
         }
-        val publicNote = if (done.savedToPublicDownloads) " • Saved to Downloads/Velo" else ""
+        val publicNote = if (done.savedToPublicDownloads) {
+            " • Saved in Downloads/Velo"
+        } else if (!hasPublicStorageAccess()) {
+            " • Tap Allow Storage in Downloads to save in Downloads/Velo"
+        } else {
+            ""
+        }
 
         if (done.mimeType.equals("application/pdf", ignoreCase = true) ||
             done.formatLabel.equals("PDF", ignoreCase = true)
@@ -1794,7 +1816,7 @@ class BrowserViewModel(
                         }
                 }
             }
-            mime.startsWith("image/") || fmt in setOf("PNG", "JPG", "WEBP", "GIF", "IMAGE") -> {
+            mime.startsWith("image/") || fmt in setOf("PNG", "JPG", "JPEG", "WEBP", "GIF", "BMP", "AVIF", "IMAGE") -> {
                 openImageViewer(
                     request = ImageViewerRequest(
                         title = item.title,
@@ -1804,7 +1826,7 @@ class BrowserViewModel(
                     returnTo = ActiveOverlay.VIDEO_DOWNLOADER
                 )
             }
-            mime.startsWith("audio/") || fmt in setOf("MP3", "M4A", "WAV", "OGG", "FLAC", "AUDIO") -> {
+            mime.startsWith("audio/") || fmt in setOf("MP3", "M4A", "WAV", "OGG", "FLAC", "AAC", "OPUS", "AUDIO") -> {
                 openVideoPlayer(
                     request = VideoPlayerRequest(
                         title = item.title,
@@ -1815,7 +1837,7 @@ class BrowserViewModel(
                     returnTo = ActiveOverlay.VIDEO_DOWNLOADER
                 )
             }
-            mime.startsWith("video/") || fmt in setOf("MP4", "WEBM", "MKV", "MOV", "M4V", "3GP", "HLS", "HLS/TS", "VIDEO") -> {
+            mime.startsWith("video/") || fmt in setOf("MP4", "WEBM", "MKV", "MOV", "M4V", "3GP", "TS", "HLS", "HLS/TS", "HLS/MP4", "VIDEO") -> {
                 openVideoPlayer(
                     request = VideoPlayerRequest(
                         title = item.title,
@@ -1827,7 +1849,15 @@ class BrowserViewModel(
                 )
             }
             else -> {
-                showTransientBanner("Saved in Downloads/Velo (${item.title}).")
+                val file = java.io.File(item.localPath)
+                VeloFileSharing.openWithExternalApp(
+                    context = appContext,
+                    file = file,
+                    mimeType = item.mimeType,
+                    title = item.title
+                ).onFailure {
+                    showTransientBanner("Saved in Downloads/Velo (${item.title}). Use Share to send it to another app.")
+                }
             }
         }
     }
@@ -2044,9 +2074,17 @@ class BrowserViewModel(
             try {
                 pdfEngine.convertImagesToPdf(uris, title)
                     .onSuccess { doc ->
+                        val savedPublic = withContext(Dispatchers.IO) {
+                            videoDownloadEngine.saveFileToPublicDownloads(
+                                java.io.File(doc.filePath),
+                                "${doc.title}.pdf",
+                                "application/pdf"
+                            )
+                        }
                         refreshSavedPdfs()
                         _activePdfDocument.value = doc
-                        showTransientBanner("Created PDF \"${doc.title}\" (${doc.pageCount} pages).")
+                        val note = if (savedPublic) " • Saved in Downloads/Velo" else ""
+                        showTransientBanner("Created PDF \"${doc.title}\" (${doc.pageCount} pages)$note.")
                     }
                     .onFailure { err ->
                         showTransientBanner(err.localizedMessage ?: "Image-to-PDF conversion failed.")
@@ -2063,9 +2101,17 @@ class BrowserViewModel(
             try {
                 pdfEngine.convertTextToPdf(title, body)
                     .onSuccess { doc ->
+                        val savedPublic = withContext(Dispatchers.IO) {
+                            videoDownloadEngine.saveFileToPublicDownloads(
+                                java.io.File(doc.filePath),
+                                "${doc.title}.pdf",
+                                "application/pdf"
+                            )
+                        }
                         refreshSavedPdfs()
                         _activePdfDocument.value = doc
-                        showTransientBanner("Converted text to PDF \"${doc.title}\".")
+                        val note = if (savedPublic) " • Saved in Downloads/Velo" else ""
+                        showTransientBanner("Converted text to PDF \"${doc.title}\"$note.")
                     }
                     .onFailure { err ->
                         showTransientBanner(err.localizedMessage ?: "Text-to-PDF conversion failed.")
@@ -2086,9 +2132,17 @@ class BrowserViewModel(
             try {
                 pdfEngine.convertWebViewToPdf(webView, title)
                     .onSuccess { doc ->
+                        val savedPublic = withContext(Dispatchers.IO) {
+                            videoDownloadEngine.saveFileToPublicDownloads(
+                                java.io.File(doc.filePath),
+                                "${doc.title}.pdf",
+                                "application/pdf"
+                            )
+                        }
                         refreshSavedPdfs()
                         _activePdfDocument.value = doc
-                        showTransientBanner("Saved webpage as PDF (${doc.pageCount} pages).")
+                        val note = if (savedPublic) " • Saved in Downloads/Velo" else ""
+                        showTransientBanner("Saved webpage as PDF (${doc.pageCount} pages)$note.")
                     }
                     .onFailure { err ->
                         showTransientBanner(err.localizedMessage ?: "Webpage-to-PDF failed.")

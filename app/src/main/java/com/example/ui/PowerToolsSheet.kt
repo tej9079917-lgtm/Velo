@@ -133,12 +133,16 @@ fun PowerToolsSheet(
             item {
                 PowerToolCard(
                     icon = Icons.Default.Download,
-                    title = "Video Downloader",
-                    subtitle = if (detectedVideosCount > 0) "$detectedVideosCount playing stream(s) ready" else "Save playing web videos offline",
+                    title = "Downloads & Media",
+                    subtitle = if (detectedVideosCount > 0) {
+                        "$detectedVideosCount stream(s) & $downloadedVideosCount saved"
+                    } else {
+                        "View downloading, saved files & page media"
+                    },
                     badge = when {
                         detectedVideosCount > 0 -> "$detectedVideosCount LIVE"
                         downloadedVideosCount > 0 -> "$downloadedVideosCount"
-                        else -> null
+                        else -> "FOLDER"
                     },
                     accent = ShieldEmerald,
                     enabled = true,

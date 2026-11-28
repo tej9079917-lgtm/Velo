@@ -1,7 +1,9 @@
 package com.example.ui
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.os.Build
 import android.speech.RecognizerIntent
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -175,6 +177,7 @@ fun BrowserMainScreen(
     val detectedImages by viewModel.detectedImagesForActiveTab.collectAsStateWithLifecycle()
     val downloadedMedia by viewModel.downloadedMedia.collectAsStateWithLifecycle()
     val activeDownload by viewModel.activeDownload.collectAsStateWithLifecycle()
+    val downloaderInitialTab by viewModel.downloaderInitialTab.collectAsStateWithLifecycle()
     val videoPlayerRequest by viewModel.videoPlayerRequest.collectAsStateWithLifecycle()
     val imageViewerRequest by viewModel.imageViewerRequest.collectAsStateWithLifecycle()
     val savedPdfs by viewModel.savedPdfs.collectAsStateWithLifecycle()
@@ -190,6 +193,26 @@ fun BrowserMainScreen(
     val secretImagePreview by viewModel.secretImagePreview.collectAsStateWithLifecycle()
     val pendingDeleteOriginalUris by viewModel.pendingDeleteOriginalUris.collectAsStateWithLifecycle()
     val backgroundAudioActive by viewModel.backgroundAudioActive.collectAsStateWithLifecycle()
+
+    var hasPublicStorageAccess by remember { mutableStateOf(viewModel.hasPublicStorageAccess()) }
+    val legacyStoragePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasPublicStorageAccess = granted || viewModel.hasPublicStorageAccess()
+        if (hasPublicStorageAccess) {
+            viewModel.showTransientBanner("Storage access granted — downloads will save to Downloads/Velo.")
+        } else {
+            viewModel.showTransientBanner("Storage access denied — files will save inside Velo Downloads.")
+        }
+    }
+
+    fun requestLegacyStorageIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && !viewModel.hasPublicStorageAccess()) {
+            legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            hasPublicStorageAccess = true
+        }
+    }
 
     var longPressedImage by remember { mutableStateOf<Pair<String, String?>?>(null) }
     var longPressImageFormat by remember { mutableStateOf(ImageDownloadFormat.ORIGINAL) }
@@ -604,6 +627,57 @@ fun BrowserMainScreen(
                                             text = "${activeTab.blockedCount}",
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Direct 1-Tap Downloads Manager Button (shows live spinner when downloading or file count badge)
+                            Box(
+                                modifier = Modifier.size(48.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        hasPublicStorageAccess = viewModel.hasPublicStorageAccess()
+                                        if (activeTab.url.startsWith("http")) {
+                                            webViewManager.scanPageForVideos(activeTab.id)
+                                            webViewManager.scanPageForImages(activeTab.id)
+                                        }
+                                        viewModel.openDownloadsManager(initialTab = 0)
+                                    },
+                                    modifier = Modifier.size(48.dp).testTag("top_downloads_button")
+                                ) {
+                                    if (activeDownload != null) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(20.dp),
+                                            strokeWidth = 2.2.dp,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.Download,
+                                            contentDescription = stringResource(R.string.downloads_button_cd),
+                                            tint = if (downloadedMedia.isNotEmpty()) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                }
+                                if (activeDownload == null && downloadedMedia.isNotEmpty()) {
+                                    Surface(
+                                        color = ShieldEmerald,
+                                        shape = CircleShape,
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(top = 6.dp, end = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = downloadedMedia.size.coerceAtMost(99).toString(),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.Black,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                                         )
                                     }
                                 }
@@ -1195,9 +1269,18 @@ fun BrowserMainScreen(
                             modifier = Modifier
                                 .height(48.dp)
                                 .clickable {
-                                    webViewManager.scanPageForVideos(activeTab.id)
-                                    webViewManager.scanPageForImages(activeTab.id)
-                                    viewModel.setOverlay(ActiveOverlay.VIDEO_DOWNLOADER)
+                                    hasPublicStorageAccess = viewModel.hasPublicStorageAccess()
+                                    if (activeTab.url.startsWith("http")) {
+                                        webViewManager.scanPageForVideos(activeTab.id)
+                                        webViewManager.scanPageForImages(activeTab.id)
+                                    }
+                                    val targetTab = when {
+                                        activeDownload != null -> 0
+                                        detectedVideos.isNotEmpty() -> 1
+                                        detectedImages.isNotEmpty() -> 2
+                                        else -> 0
+                                    }
+                                    viewModel.openDownloadsManager(initialTab = targetTab)
                                 }
                                 .testTag("floating_download_video_button")
                         ) {
@@ -1468,9 +1551,12 @@ fun BrowserMainScreen(
                     onOpenVault = { viewModel.setOverlay(ActiveOverlay.PASSWORD_VAULT) },
                     onOpenNewPrivateTab = { viewModel.createNewTab(isPrivate = true) },
                     onOpenVideoDownloader = {
-                        webViewManager.scanPageForVideos(activeTab.id)
-                        webViewManager.scanPageForImages(activeTab.id)
-                        viewModel.setOverlay(ActiveOverlay.VIDEO_DOWNLOADER)
+                        hasPublicStorageAccess = viewModel.hasPublicStorageAccess()
+                        if (activeTab.url.startsWith("http")) {
+                            webViewManager.scanPageForVideos(activeTab.id)
+                            webViewManager.scanPageForImages(activeTab.id)
+                        }
+                        viewModel.openDownloadsManager(initialTab = 0)
                     },
                     onOpenVideoPlayer = {
                         val firstDetected = detectedVideos.firstOrNull()
@@ -1721,10 +1807,14 @@ fun BrowserMainScreen(
                 )
 
                 ActiveOverlay.VIDEO_DOWNLOADER -> VideoDownloaderSheet(
+                    initialTab = downloaderInitialTab,
+                    hasStorageAccess = hasPublicStorageAccess,
                     detectedVideos = detectedVideos,
                     detectedImages = detectedImages,
                     downloadedVideos = downloadedMedia,
                     activeDownload = activeDownload,
+                    onRequestStoragePermission = { requestLegacyStorageIfNeeded() },
+                    onOpenDownloadsFolder = { viewModel.openSystemDownloadsFolder() },
                     onRescanPage = {
                         webViewManager.scanPageForVideos(activeTab.id)
                         webViewManager.scanPageForImages(activeTab.id)

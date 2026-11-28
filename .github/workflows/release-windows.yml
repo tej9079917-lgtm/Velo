@@ -50,6 +50,7 @@ jobs:
         working-directory: velo-windows
         run: |
           node --check src/crypto-engine.js
+          node --check src/media-interceptor.js
           node --check src/main.js
           node --check src/preload.js
           node --check src/renderer/app.js

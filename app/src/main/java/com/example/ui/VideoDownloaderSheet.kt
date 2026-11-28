@@ -25,11 +25,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.EnhancedEncryption
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.MusicNote
@@ -38,8 +40,10 @@ import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -59,9 +63,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.R
 import com.example.browser.ActiveDownloadProgress
 import com.example.browser.DetectedImageMedia
 import com.example.browser.DetectedVideoMedia
@@ -73,10 +79,14 @@ import com.example.ui.theme.WarningAmber
 
 @Composable
 fun VideoDownloaderSheet(
+    initialTab: Int = 0,
+    hasStorageAccess: Boolean = true,
     detectedVideos: List<DetectedVideoMedia>,
     detectedImages: List<DetectedImageMedia>,
     downloadedVideos: List<DownloadedMediaItem>,
     activeDownload: ActiveDownloadProgress?,
+    onRequestStoragePermission: () -> Unit,
+    onOpenDownloadsFolder: () -> Unit,
     onRescanPage: () -> Unit,
     onDownloadVideo: (url: String, title: String, quality: String) -> Unit,
     onSystemDownload: (url: String, title: String) -> Unit,
@@ -91,7 +101,7 @@ fun VideoDownloaderSheet(
 ) {
     BackHandler(onBack = onDismiss)
     var directUrlInput by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableIntStateOf(if (detectedVideos.isEmpty() && detectedImages.isNotEmpty()) 1 else 0) }
+    var selectedTab by remember(initialTab) { mutableIntStateOf(initialTab.coerceIn(0, 2)) }
     var selectedImageFormat by remember { mutableStateOf(ImageDownloadFormat.ORIGINAL) }
 
     Column(
@@ -111,12 +121,12 @@ fun VideoDownloaderSheet(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Media & Image Saver",
+                    text = "Downloads & Media",
                     style = MaterialTheme.typography.headlineSmall,
                     color = MaterialTheme.colorScheme.onBackground
                 )
                 Text(
-                    text = "Save videos, full-size images in any format & files to Downloads/Velo",
+                    text = "View active downloads, saved files & capture page media",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -131,94 +141,127 @@ fun VideoDownloaderSheet(
                 onClick = onDismiss,
                 modifier = Modifier.size(48.dp).testTag("close_video_downloader_button")
             ) {
-                Icon(Icons.Default.Close, contentDescription = "Close media downloader")
+                Icon(Icons.Default.Close, contentDescription = "Close downloads manager")
             }
         }
 
-        // Section Filter Tabs (Videos / Page Images / Saved)
-        Row(
+        // Public Downloads Storage Banner + 1-Tap "Open Folder"
+        Surface(
+            color = if (hasStorageAccess) {
+                ShieldEmerald.copy(alpha = 0.12f)
+            } else {
+                WarningAmber.copy(alpha = 0.15f)
+            },
+            shape = RoundedCornerShape(14.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+                .border(
+                    1.dp,
+                    if (hasStorageAccess) ShieldEmerald.copy(alpha = 0.35f) else WarningAmber.copy(alpha = 0.45f),
+                    RoundedCornerShape(14.dp)
+                )
         ) {
-            FilterChip(
-                selected = selectedTab == 0,
-                onClick = { selectedTab = 0 },
-                label = { Text("Videos (${detectedVideos.size})") },
-                modifier = Modifier.testTag("downloader_tab_videos")
-            )
-            FilterChip(
-                selected = selectedTab == 1,
-                onClick = { selectedTab = 1 },
-                label = { Text("Page Images (${detectedImages.size})") },
-                modifier = Modifier.testTag("downloader_tab_images")
-            )
-            FilterChip(
-                selected = selectedTab == 2,
-                onClick = { selectedTab = 2 },
-                label = { Text("Saved (${downloadedVideos.size})") },
-                modifier = Modifier.testTag("downloader_tab_saved")
-            )
-        }
-
-        // Active Download Progress Card
-        if (activeDownload != null) {
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(16.dp),
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                Icon(
+                    imageVector = if (hasStorageAccess) Icons.Default.CheckCircle else Icons.Default.Storage,
+                    contentDescription = null,
+                    tint = if (hasStorageAccess) ShieldEmerald else WarningAmber,
+                    modifier = Modifier.size(20.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (hasStorageAccess) "Saving to Downloads/Velo" else "Storage Access Needed",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = if (hasStorageAccess) {
+                            "Files are saved to your phone's Downloads folder"
+                        } else {
+                            "Grant storage access to save files in Downloads/Velo"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (hasStorageAccess) {
+                    OutlinedButton(
+                        onClick = onOpenDownloadsFolder,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("open_system_downloads_folder_button")
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Downloading: ${activeDownload.title}",
-                                style = MaterialTheme.typography.titleSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            val dlMb = activeDownload.downloadedBytes / (1024.0 * 1024.0)
-                            val sizeText = if (activeDownload.totalBytes > 0L) {
-                                val totMb = activeDownload.totalBytes / (1024.0 * 1024.0)
-                                "${"%.2f".format(dlMb)} MB / ${"%.2f".format(totMb)} MB"
-                            } else {
-                                "${"%.2f".format(dlMb)} MB downloaded"
-                            }
-                            Text(
-                                text = sizeText,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        TextButton(
-                            onClick = onCancelDownload,
-                            modifier = Modifier.testTag("cancel_video_download_button")
-                        ) {
-                            Text("Cancel", color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    if (activeDownload.fraction >= 0f) {
-                        LinearProgressIndicator(
-                            progress = { activeDownload.fraction },
-                            modifier = Modifier.fillMaxWidth().height(6.dp)
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = stringResource(R.string.open_downloads_folder_action),
+                            style = MaterialTheme.typography.labelMedium
                         )
-                    } else {
-                        LinearProgressIndicator(
-                            modifier = Modifier.fillMaxWidth().height(6.dp)
+                    }
+                } else {
+                    Button(
+                        onClick = onRequestStoragePermission,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("grant_storage_permission_button")
+                    ) {
+                        Text(
+                            text = stringResource(R.string.grant_storage_permission_action),
+                            style = MaterialTheme.typography.labelMedium
                         )
                     }
                 }
             }
+        }
+
+        // Section Filter Tabs (Downloads / Page Videos / Page Images)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            val downloadsLabel = if (activeDownload != null) {
+                "Downloads (1 active • ${downloadedVideos.size})"
+            } else {
+                "Downloads (${downloadedVideos.size})"
+            }
+            FilterChip(
+                selected = selectedTab == 0,
+                onClick = { selectedTab = 0 },
+                label = { Text(downloadsLabel) },
+                modifier = Modifier.testTag("downloader_tab_saved")
+            )
+            FilterChip(
+                selected = selectedTab == 1,
+                onClick = { selectedTab = 1 },
+                label = { Text("Page Videos (${detectedVideos.size})") },
+                modifier = Modifier.testTag("downloader_tab_videos")
+            )
+            FilterChip(
+                selected = selectedTab == 2,
+                onClick = { selectedTab = 2 },
+                label = { Text("Page Images (${detectedImages.size})") },
+                modifier = Modifier.testTag("downloader_tab_images")
+            )
+        }
+
+        // Pinned Active Download Progress Card when user is browsing Page Videos / Page Images
+        if (activeDownload != null && selectedTab != 0) {
+            ActiveDownloadProgressCard(
+                activeDownload = activeDownload,
+                onCancelDownload = onCancelDownload,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
         }
 
         LazyColumn(
@@ -227,8 +270,26 @@ fun VideoDownloaderSheet(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             when (selectedTab) {
-                // TAB 0: PAGE VIDEOS & DIRECT URL DOWNLOADER
+                // TAB 0: DOWNLOADS MANAGER (ACTIVE DOWNLOADING + DIRECT URL + COMPLETED FILES)
                 0 -> {
+                    // Downloading Now Section
+                    if (activeDownload != null) {
+                        item {
+                            Text(
+                                text = "Downloading Now",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                        }
+                        item {
+                            ActiveDownloadProgressCard(
+                                activeDownload = activeDownload,
+                                onCancelDownload = onCancelDownload
+                            )
+                        }
+                    }
+
+                    // Direct Any-File URL Downloader
                     item {
                         Surface(
                             color = MaterialTheme.colorScheme.surface,
@@ -239,13 +300,13 @@ fun VideoDownloaderSheet(
                         ) {
                             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
-                                    text = "Direct Video or File URL",
+                                    text = "Download Any File or Stream URL",
                                     style = MaterialTheme.typography.titleSmall
                                 )
                                 OutlinedTextField(
                                     value = directUrlInput,
                                     onValueChange = { directUrlInput = it },
-                                    placeholder = { Text("Paste .mp4, .webm, .mkv, .m3u8, .pdf, or image URL") },
+                                    placeholder = { Text("Paste .mp4, .m3u8, .pdf, .zip, .apk, .mp3, or image link") },
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth().testTag("direct_video_url_input")
                                 )
@@ -281,9 +342,73 @@ fun VideoDownloaderSheet(
                         }
                     }
 
+                    // Completed Downloads Section
                     item {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Downloaded Files (${downloadedVideos.size})",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            if (downloadedVideos.isNotEmpty()) {
+                                Surface(
+                                    color = ShieldEmerald.copy(alpha = 0.16f),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text(
+                                        text = "Downloads/Velo",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ShieldEmerald,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (downloadedVideos.isEmpty()) {
+                        item {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(
+                                        text = "No downloaded files yet",
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+                                    Text(
+                                        text = "Tap any file link on a website, paste a URL above, or switch to Page Videos / Page Images. Every saved file appears here and in your phone's Downloads/Velo folder.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        items(downloadedVideos, key = { it.id }) { item ->
+                            DownloadedVideoCard(
+                                item = item,
+                                onPlay = { onPlayDownloaded(item) },
+                                onShare = { onShareDownloaded(item) },
+                                onHideInVault = { onHideDownloadedInVault(item) },
+                                onDelete = { onDeleteDownloaded(item) }
+                            )
+                        }
+                    }
+                }
+
+                // TAB 1: PAGE VIDEOS
+                1 -> {
+                    item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -323,7 +448,7 @@ fun VideoDownloaderSheet(
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = "Start playing any embedded video on the page and tap Refresh (top right) to capture its stream without needing a download link.",
+                                        text = "Start playing an embedded HTML5/M3U8/MP4 video on a webpage and tap Refresh (top right) to capture its stream. Note: DRM-protected platforms like YouTube restrict third-party video downloads.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -335,7 +460,10 @@ fun VideoDownloaderSheet(
                             DetectedVideoCard(
                                 media = media,
                                 isBusy = activeDownload != null,
-                                onDownload = { onDownloadVideo(media.url, media.title, media.qualityLabel) },
+                                onDownload = {
+                                    selectedTab = 0
+                                    onDownloadVideo(media.url, media.title, media.qualityLabel)
+                                },
                                 onSystemDownload = { onSystemDownload(media.url, media.title) },
                                 onPlay = { onPlayStream(media) }
                             )
@@ -343,8 +471,8 @@ fun VideoDownloaderSheet(
                     }
                 }
 
-                // TAB 1: FULL-SIZE MULTI-FORMAT PAGE IMAGE DOWNLOADER
-                1 -> {
+                // TAB 2: FULL-SIZE MULTI-FORMAT PAGE IMAGE DOWNLOADER
+                else -> {
                     item {
                         Surface(
                             color = MaterialTheme.colorScheme.surface,
@@ -407,34 +535,83 @@ fun VideoDownloaderSheet(
                                 image = img,
                                 selectedFormat = selectedImageFormat,
                                 isBusy = activeDownload != null,
-                                onDownload = { onDownloadImageInFormat(img.url, img.title, selectedImageFormat) }
+                                onDownload = {
+                                    selectedTab = 0
+                                    onDownloadImageInFormat(img.url, img.title, selectedImageFormat)
+                                }
                             )
                         }
                     }
                 }
+            }
+        }
+    }
+}
 
-                // TAB 2: SAVED DOWNLOADS (OPEN / SHARE VIA FILEPROVIDER / HIDE IN VAULT / DELETE)
-                else -> {
-                    if (downloadedVideos.isEmpty()) {
-                        item {
-                            Text(
-                                text = "Downloaded videos, full-size images, PDFs, audios, and files appear here and in your phone's Downloads/Velo folder.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+@Composable
+private fun ActiveDownloadProgressCard(
+    activeDownload: ActiveDownloadProgress,
+    onCancelDownload: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+        shape = RoundedCornerShape(16.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+            .testTag("active_download_card")
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(22.dp),
+                    strokeWidth = 2.5.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = activeDownload.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    val dlMb = activeDownload.downloadedBytes / (1024.0 * 1024.0)
+                    val pct = (activeDownload.fraction * 100f).toInt()
+                    val sizeText = if (activeDownload.totalBytes > 0L) {
+                        val totMb = activeDownload.totalBytes / (1024.0 * 1024.0)
+                        "$pct% • ${"%.2f".format(dlMb)} MB / ${"%.2f".format(totMb)} MB"
                     } else {
-                        items(downloadedVideos, key = { it.id }) { item ->
-                            DownloadedVideoCard(
-                                item = item,
-                                onPlay = { onPlayDownloaded(item) },
-                                onShare = { onShareDownloaded(item) },
-                                onHideInVault = { onHideDownloadedInVault(item) },
-                                onDelete = { onDeleteDownloaded(item) }
-                            )
-                        }
+                        "${"%.2f".format(dlMb)} MB downloaded..."
                     }
+                    Text(
+                        text = sizeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        color = MaterialTheme.colorScheme.primary
+                    )
                 }
+                TextButton(
+                    onClick = onCancelDownload,
+                    modifier = Modifier.testTag("cancel_video_download_button")
+                ) {
+                    Text("Cancel", color = MaterialTheme.colorScheme.error)
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            if (activeDownload.fraction >= 0f) {
+                LinearProgressIndicator(
+                    progress = { activeDownload.fraction },
+                    modifier = Modifier.fillMaxWidth().height(6.dp)
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().height(6.dp)
+                )
             }
         }
     }
@@ -609,9 +786,9 @@ private fun DownloadedVideoCard(
     val lowerMime = item.mimeType.lowercase()
     val fmt = item.formatLabel.uppercase()
     val isPdf = lowerMime == "application/pdf" || fmt == "PDF"
-    val isImage = lowerMime.startsWith("image/") || fmt in setOf("PNG", "JPG", "JPEG", "WEBP", "GIF", "IMAGE")
-    val isAudio = lowerMime.startsWith("audio/") || fmt in setOf("MP3", "M4A", "WAV", "OGG", "FLAC", "AUDIO")
-    val isVideo = lowerMime.startsWith("video/") || fmt in setOf("MP4", "WEBM", "MKV", "MOV", "M4V", "3GP", "HLS", "HLS/TS", "VIDEO")
+    val isImage = lowerMime.startsWith("image/") || fmt in setOf("PNG", "JPG", "JPEG", "WEBP", "GIF", "BMP", "AVIF", "IMAGE")
+    val isAudio = lowerMime.startsWith("audio/") || fmt in setOf("MP3", "M4A", "WAV", "OGG", "FLAC", "AAC", "OPUS", "AUDIO")
+    val isVideo = lowerMime.startsWith("video/") || fmt in setOf("MP4", "WEBM", "MKV", "MOV", "M4V", "3GP", "TS", "HLS", "HLS/TS", "HLS/MP4", "VIDEO")
 
     val itemIcon = when {
         isPdf -> Icons.Default.PictureAsPdf
@@ -625,7 +802,7 @@ private fun DownloadedVideoCard(
         isImage -> "View"
         isAudio -> "Play"
         isVideo -> "Play"
-        else -> "Info"
+        else -> "Open"
     }
     val actionIcon = if (isVideo || isAudio) Icons.Default.PlayArrow else Icons.Default.OpenInNew
 

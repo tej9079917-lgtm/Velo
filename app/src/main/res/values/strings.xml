@@ -35,4 +35,7 @@
     <string name="add_credential_action">Add Password</string>
     <string name="fill_on_page_action">Fill on Page</string>
     <string name="sign_out_action">Sign Out</string>
+    <string name="downloads_button_cd">Open downloads manager</string>
+    <string name="open_downloads_folder_action">Open Folder</string>
+    <string name="grant_storage_permission_action">Allow Storage</string>
 </resources>

@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const https = require('https');
 const { pathToFileURL } = require('url');
 const cryptoEngine = require('./crypto-engine');
+const mediaInterceptorLib = require('./media-interceptor');
 
 // Ensure single instance on Windows so double-clicking PDFs/MP4s/Images opens in existing Velo window
 const gotLock = app.requestSingleInstanceLock();
@@ -151,7 +152,7 @@ function classifyMediaType(filePathOrMime) {
   if (lower.includes('pdf') || lower.endsWith('.pdf')) return 'pdf';
   if (
     lower.startsWith('video/') ||
-    /\.(mp4|webm|mkv|mov|avi|m4v)$/.test(lower)
+    /\.(mp4|webm|mkv|mov|avi|m4v|ts)$/.test(lower)
   ) return 'video';
   if (
     lower.startsWith('audio/') ||
@@ -169,6 +170,7 @@ function mimeFromExt(filePath) {
   const map = {
     '.pdf': 'application/pdf',
     '.mp4': 'video/mp4',
+    '.ts': 'video/mp2t',
     '.webm': 'video/webm',
     '.mkv': 'video/x-matroska',
     '.mov': 'video/quicktime',
@@ -209,12 +211,20 @@ function upsertDownloadRecord(record) {
   return record;
 }
 
-// --- Session Ad-Blocker & Download Hook ---
+// --- Session Ad-Blocker, Media Stream Interceptor & Download Hook ---
 const hookedSessions = new WeakSet();
+const mediaInterceptor = mediaInterceptorLib.createMediaInterceptor({
+  onStreamsChanged: (wcId, streams) => {
+    sendToRenderer('velo:streams-updated', { webContentsId: wcId, streams });
+  }
+});
 
 function attachSessionHooks(ses) {
   if (!ses || hookedSessions.has(ses)) return;
   hookedSessions.add(ses);
+
+  // Network-level M3U8/MP4/Audio stream interceptor
+  mediaInterceptor.attachToSession(ses);
 
   // Ad & Tracker Blocker
   ses.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
@@ -478,6 +488,17 @@ app.on('session-created', (ses) => {
   attachSessionHooks(ses);
 });
 
+app.on('web-contents-created', (_event, wc) => {
+  wc.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) {
+      mediaInterceptor.clearStreams(wc.id);
+    }
+  });
+  wc.on('destroyed', () => {
+    mediaInterceptor.clearStreams(wc.id);
+  });
+});
+
 app.on('second-instance', (_event, argv) => {
   const targets = extractTargetsFromArgv(argv);
   if (mainWindow) {
@@ -553,34 +574,121 @@ ipcMain.handle('window:set-content-protection', (_event, enabled) => {
   return { ok: true };
 });
 
-// --- Universal Media & Image Downloader ---
+// --- Universal Media, M3U8/MP4 Stream & Image Downloader ---
 ipcMain.handle('downloads:list', () => loadDownloads());
 
-ipcMain.handle('downloads:url', async (_event, { url, filename, referer }) => {
+ipcMain.handle('streams:list', (_event, webContentsId) => {
+  return mediaInterceptor.listStreams(webContentsId);
+});
+
+ipcMain.handle('streams:clear', (_event, webContentsId) => {
+  mediaInterceptor.clearStreams(webContentsId);
+  return { ok: true };
+});
+
+async function executeStreamOrFileDownload({ url, filename, referer, origin, mimeType, webContentsId }) {
   if (!url || (!/^https?:\/\//i.test(url) && !url.startsWith('data:'))) {
     throw new Error('Only HTTP, HTTPS, or Data URLs can be downloaded.');
   }
+
+  const targetWc = webContentsId ? webContents.fromId(Number(webContentsId)) : null;
+  const ses = (targetWc && !targetWc.isDestroyed() && targetWc.session)
+    ? targetWc.session
+    : session.fromPartition('persist:velo-main');
+
   const id = crypto.randomUUID();
   const downloadsDir = getDownloadsDir();
-  const inferredName = filename || (() => {
+  const isHls = mediaInterceptorLib.isM3u8UrlOrMime(url, mimeType);
+  const baseTitle = sanitizeFilename(filename || (() => {
     try {
       const p = new URL(url).pathname;
       const base = path.basename(p);
-      return base && base.includes('.') ? base : `velo_media_${Date.now()}.mp4`;
+      if (base && base.includes('.') && !/\.m3u8$/i.test(base)) return base;
+      return `velo_video_${Date.now()}`;
     } catch {
-      return `velo_media_${Date.now()}.bin`;
+      return `velo_video_${Date.now()}`;
     }
-  })();
+  })()).replace(/\.m3u8$/i, '');
 
-  const savePath = uniqueDestPath(downloadsDir, inferredName);
+  if (isHls) {
+    upsertDownloadRecord({
+      id,
+      filename: `${baseTitle} (HLS Stream)`,
+      filePath: '',
+      fileUrl: '',
+      url,
+      mimeType: 'video/mp2t',
+      mediaType: 'video',
+      receivedBytes: 0,
+      totalBytes: 0,
+      state: 'in-progress',
+      createdAt: Date.now()
+    });
+
+    try {
+      const result = await mediaInterceptorLib.downloadHlsStream({
+        ses,
+        url,
+        referer,
+        origin,
+        saveDir: downloadsDir,
+        baseName: baseTitle,
+        uniqueDestPath,
+        onProgress: ({ receivedBytes, totalBytes, segmentsDone, segmentsTotal }) => {
+          upsertDownloadRecord({
+            id,
+            filename: `${baseTitle} (${segmentsDone}/${segmentsTotal} segments)`,
+            receivedBytes,
+            totalBytes,
+            state: 'in-progress'
+          });
+        }
+      });
+
+      return upsertDownloadRecord({
+        id,
+        filename: result.filename,
+        filePath: result.filePath,
+        fileUrl: result.fileUrl,
+        url,
+        mimeType: result.mimeType,
+        mediaType: 'video',
+        receivedBytes: result.receivedBytes,
+        totalBytes: result.receivedBytes,
+        state: 'completed',
+        createdAt: Date.now()
+      });
+    } catch (err) {
+      upsertDownloadRecord({
+        id,
+        state: 'interrupted',
+        error: err.message
+      });
+      throw err;
+    }
+  }
+
+  // Direct MP4 / WebM / Audio / File stream
+  const hasExt = /\.[a-z0-9]{2,5}$/i.test(baseTitle);
+  const extFromFmt = (() => {
+    const fmt = mediaInterceptorLib.classifyStreamFormat(url, mimeType);
+    if (fmt === 'webm') return '.webm';
+    if (fmt === 'mkv') return '.mkv';
+    if (fmt === 'mov') return '.mov';
+    if (fmt === 'audio') return '.mp3';
+    return '.mp4';
+  })();
+  const finalName = hasExt ? baseTitle : `${baseTitle}${extFromFmt}`;
+  const savePath = uniqueDestPath(downloadsDir, finalName);
+
   upsertDownloadRecord({
     id,
     filename: path.basename(savePath),
     filePath: savePath,
     fileUrl: pathToFileURL(savePath).href,
     url,
-    mimeType: mimeFromExt(savePath),
-    mediaType: classifyMediaType(savePath),
+    mimeType: mimeType || mimeFromExt(savePath),
+    mediaType: classifyMediaType(mimeType || savePath),
     receivedBytes: 0,
     totalBytes: 0,
     state: 'in-progress',
@@ -588,22 +696,53 @@ ipcMain.handle('downloads:url', async (_event, { url, filename, referer }) => {
   });
 
   try {
-    const { buffer, contentType } = await fetchBufferWithSession(url, referer);
-    fs.writeFileSync(savePath, buffer);
-    const done = upsertDownloadRecord({
-      id,
-      filename: path.basename(savePath),
-      filePath: savePath,
-      fileUrl: pathToFileURL(savePath).href,
+    if (url.startsWith('data:')) {
+      const { buffer, contentType } = await fetchBufferWithSession(url, referer);
+      fs.writeFileSync(savePath, buffer);
+      return upsertDownloadRecord({
+        id,
+        filename: path.basename(savePath),
+        filePath: savePath,
+        fileUrl: pathToFileURL(savePath).href,
+        url,
+        mimeType: contentType || mimeFromExt(savePath),
+        mediaType: classifyMediaType(contentType || savePath),
+        receivedBytes: buffer.length,
+        totalBytes: buffer.length,
+        state: 'completed',
+        createdAt: Date.now()
+      });
+    }
+
+    const result = await mediaInterceptorLib.downloadDirectStream({
+      ses,
       url,
-      mimeType: contentType || mimeFromExt(savePath),
-      mediaType: classifyMediaType(contentType || savePath),
-      receivedBytes: buffer.length,
-      totalBytes: buffer.length,
+      referer,
+      origin,
+      savePath,
+      onProgress: ({ receivedBytes, totalBytes }) => {
+        upsertDownloadRecord({
+          id,
+          receivedBytes,
+          totalBytes,
+          state: 'in-progress'
+        });
+      }
+    });
+
+    return upsertDownloadRecord({
+      id,
+      filename: result.filename,
+      filePath: result.filePath,
+      fileUrl: result.fileUrl,
+      url,
+      mimeType: result.mimeType || mimeFromExt(savePath),
+      mediaType: classifyMediaType(result.mimeType || savePath),
+      receivedBytes: result.receivedBytes,
+      totalBytes: result.receivedBytes,
       state: 'completed',
       createdAt: Date.now()
     });
-    return done;
   } catch (err) {
     upsertDownloadRecord({
       id,
@@ -612,6 +751,14 @@ ipcMain.handle('downloads:url', async (_event, { url, filename, referer }) => {
     });
     throw err;
   }
+}
+
+ipcMain.handle('downloads:url', async (_event, payload) => {
+  return executeStreamOrFileDownload(payload || {});
+});
+
+ipcMain.handle('streams:download', async (_event, payload) => {
+  return executeStreamOrFileDownload(payload || {});
 });
 
 ipcMain.handle('downloads:image-format', async (_event, { url, referer, format, suggestedName }) => {

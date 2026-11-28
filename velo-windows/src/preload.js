@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('velo', {
   listDownloads: () => ipcRenderer.invoke('downloads:list'),
   downloadUrl: (payload) => ipcRenderer.invoke('downloads:url', payload),
   downloadImageFormat: (payload) => ipcRenderer.invoke('downloads:image-format', payload),
+  listInterceptedStreams: (webContentsId) => ipcRenderer.invoke('streams:list', webContentsId),
+  clearInterceptedStreams: (webContentsId) => ipcRenderer.invoke('streams:clear', webContentsId),
+  downloadStream: (payload) => ipcRenderer.invoke('streams:download', payload),
   openExternalFile: (filePath) => ipcRenderer.invoke('downloads:open-external', filePath),
   showInFolder: (filePath) => ipcRenderer.invoke('downloads:show-in-folder', filePath),
   deleteDownload: (id) => ipcRenderer.invoke('downloads:delete', id),
@@ -56,6 +59,7 @@ contextBridge.exposeInMainWorld('velo', {
   // Events
   onTrackerBlocked: (cb) => onEvent('velo:tracker-blocked', cb),
   onDownloadUpdated: (cb) => onEvent('velo:download-updated', cb),
+  onStreamsUpdated: (cb) => onEvent('velo:streams-updated', cb),
   onSpeedTestProgress: (cb) => onEvent('velo:speedtest-progress', cb),
   onOpenExternalTarget: (cb) => onEvent('velo:open-external-target', cb),
   onVaultsAutoLocked: (cb) => onEvent('velo:vaults-auto-locked', cb)

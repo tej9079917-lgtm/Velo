@@ -2,6 +2,7 @@ package com.example.media
 
 import android.app.DownloadManager
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -25,8 +26,9 @@ data class SystemDownloadStatus(
 
 /**
  * Clean Android DownloadManager wrapper for queuing background system downloads
- * with active WebView cookies, Referer, and User-Agent forwarding.
- * Saves to Downloads/Velo on API 29+ without requesting broad storage permissions.
+ * with active WebView cookies, Origin, Referer, and User-Agent forwarding.
+ * Saves to public Downloads/Velo on API 29+ (zero permissions) and on API <= 28
+ * when WRITE_EXTERNAL_STORAGE is granted.
  */
 class VeloDownloadManagerWrapper(private val context: Context) {
 
@@ -52,6 +54,13 @@ class VeloDownloadManagerWrapper(private val context: Context) {
         val scheme = uri.scheme?.lowercase()
         if (scheme != "http" && scheme != "https") {
             return Result.failure(IllegalArgumentException("DownloadManager supports HTTP/HTTPS links only."))
+        }
+        if (VideoDownloadEngine.isRestrictedVideoHost(cleanUrl)) {
+            return Result.failure(
+                IllegalStateException(
+                    "YouTube restricts third-party video downloads. Use Velo Downloader for direct files, documents, images, and open web streams."
+                )
+            )
         }
 
         val resolvedMime = mimeType.ifBlank {
@@ -80,7 +89,8 @@ class VeloDownloadManagerWrapper(private val context: Context) {
                 setAllowedOverRoaming(true)
 
                 val cookies = try {
-                    CookieManager.getInstance().getCookie(cleanUrl)
+                    val direct = CookieManager.getInstance().getCookie(cleanUrl)
+                    if (!direct.isNullOrBlank()) direct else referer?.let { CookieManager.getInstance().getCookie(it) }
                 } catch (_: Exception) {
                     null
                 }
@@ -92,9 +102,16 @@ class VeloDownloadManagerWrapper(private val context: Context) {
                 addRequestHeader("User-Agent", ua)
                 if (!referer.isNullOrBlank() && (referer.startsWith("http://") || referer.startsWith("https://"))) {
                     addRequestHeader("Referer", referer)
+                    try {
+                        val refUri = referer.toUri()
+                        if (!refUri.scheme.isNullOrBlank() && !refUri.authority.isNullOrBlank()) {
+                            addRequestHeader("Origin", "${refUri.scheme}://${refUri.authority}")
+                        }
+                    } catch (_: Exception) {
+                    }
                 }
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q || VideoDownloadEngine.hasPublicDownloadsAccess(context)) {
                     setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "Velo/$safeFileName")
                 } else {
                     setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, safeFileName)
@@ -134,6 +151,20 @@ class VeloDownloadManagerWrapper(private val context: Context) {
             }
         } catch (_: Exception) {
             null
+        }
+    }
+
+    companion object {
+        fun openSystemDownloadsFolder(context: Context): Result<Unit> {
+            return try {
+                val intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
         }
     }
 }

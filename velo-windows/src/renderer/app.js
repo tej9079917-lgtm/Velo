@@ -18,6 +18,7 @@
     splitOpen: false,
     downloads: [],
     detectedMedia: { videos: [], images: [] },
+    interceptedStreams: [],
     imageViewer: { filePath: null, scale: 1, rotation: 0 },
     vaultFilter: 'all',
     vaultItems: [],
@@ -218,10 +219,12 @@
     const showStart = !activeTab || activeTab.url === NEWTAB_URL;
     $('start-page').classList.toggle('hidden', !showStart);
     state.detectedMedia = { videos: [], images: [] };
+    state.interceptedStreams = [];
     updateMediaBadges();
     renderTabs();
     syncNavChrome();
     if (!showStart) {
+      syncInterceptedStreamsForActiveTab().catch(() => {});
       scanActiveWebviewMedia().catch(() => {});
     }
   }
@@ -491,19 +494,114 @@
         videos: Array.isArray(result?.videos) ? result.videos : [],
         images: Array.isArray(result?.images) ? result.images : []
       };
+      await syncInterceptedStreamsForActiveTab();
       updateMediaBadges();
     } catch {
-      // Ignore pages still initializing
+      await syncInterceptedStreamsForActiveTab().catch(() => {});
+      updateMediaBadges();
     }
   }
 
+  function getActiveWebContentsId() {
+    const tab = getActiveTab();
+    if (!tab || tab.url === NEWTAB_URL) return null;
+    const wv = tabWebviews.get(tab.id);
+    if (!wv || typeof wv.getWebContentsId !== 'function') return null;
+    try {
+      return wv.getWebContentsId();
+    } catch {
+      return null;
+    }
+  }
+
+  async function syncInterceptedStreamsForActiveTab() {
+    const wcId = getActiveWebContentsId();
+    if (!wcId) {
+      state.interceptedStreams = [];
+      updateMediaBadges();
+      return;
+    }
+    const streams = await velo.listInterceptedStreams(wcId);
+    state.interceptedStreams = Array.isArray(streams) ? streams : [];
+    updateMediaBadges();
+  }
+
+  function getMergedVideoStreams() {
+    const seen = new Set();
+    const merged = [];
+    const activeTabTitle = getActiveTab()?.title || '';
+    // Network-intercepted M3U8/MP4 streams take priority
+    for (const s of state.interceptedStreams) {
+      if (!s || !s.url || seen.has(s.url)) continue;
+      seen.add(s.url);
+      const fmt = String(s.format || 'mp4').toLowerCase();
+      const isHls = fmt === 'm3u8' || fmt === 'hls' || /\.m3u8(\?|$)/i.test(s.url);
+      const tag = isHls ? 'HLS M3U8' : fmt.toUpperCase();
+      const sizeStr = s.contentLength ? ` • ${formatBytes(s.contentLength)}` : '';
+      merged.push({
+        url: s.url,
+        format: isHls ? 'm3u8' : fmt,
+        mimeType: s.mimeType || (isHls ? 'application/vnd.apple.mpegurl' : ''),
+        referer: s.referer || (getActiveTab()?.url || ''),
+        origin: s.origin || '',
+        filename: activeTabTitle && activeTabTitle !== 'New Tab' ? activeTabTitle : '',
+        webContentsId: s.webContentsId || getActiveWebContentsId(),
+        label: `[${tag}] ${s.label || 'Intercepted Video Stream'}${sizeStr}`,
+        intercepted: true
+      });
+    }
+    // Append DOM-detected video/audio tags not already intercepted
+    for (const v of state.detectedMedia.videos) {
+      if (!v || !v.url || seen.has(v.url)) continue;
+      seen.add(v.url);
+      const isHls = /\.m3u8(\?|$)/i.test(v.url);
+      merged.push({
+        url: v.url,
+        format: isHls ? 'm3u8' : (v.kind === 'audio' ? 'audio' : 'mp4'),
+        mimeType: isHls ? 'application/vnd.apple.mpegurl' : '',
+        referer: getActiveTab()?.url || '',
+        origin: '',
+        filename: activeTabTitle && activeTabTitle !== 'New Tab' ? activeTabTitle : '',
+        webContentsId: getActiveWebContentsId(),
+        label: v.label || (isHls ? '[HLS M3U8] Detected Stream' : 'Detected Page Video'),
+        intercepted: false
+      });
+    }
+    return merged;
+  }
+
+  async function triggerStreamDownload(streamObj) {
+    const tab = getActiveTab();
+    const wcId = streamObj.webContentsId || getActiveWebContentsId();
+    const isHls = streamObj.format === 'm3u8' || streamObj.format === 'hls' || /\.m3u8(\?|$)/i.test(streamObj.url);
+    toast(isHls ? 'Downloading HLS M3U8 stream to Downloads\\Velo...' : 'Downloading video stream to Downloads\\Velo...');
+    const rec = await velo.downloadStream({
+      url: streamObj.url,
+      mimeType: streamObj.mimeType || (isHls ? 'application/vnd.apple.mpegurl' : ''),
+      referer: streamObj.referer || (tab ? tab.url : ''),
+      origin: streamObj.origin || '',
+      filename: streamObj.filename || '',
+      webContentsId: wcId
+    });
+    toast(`Saved ${rec.filename} to Downloads\\Velo`);
+    return rec;
+  }
+
   function updateMediaBadges() {
-    const total = state.detectedMedia.videos.length + state.detectedMedia.images.length;
+    const mergedVideos = getMergedVideoStreams();
+    const total = mergedVideos.length + state.detectedMedia.images.length;
     $('media-count').textContent = String(total);
     const fab = $('fab-save-media');
     if (total > 0 && getActiveTab() && getActiveTab().url !== NEWTAB_URL) {
       fab.classList.remove('hidden');
-      $('fab-media-label').textContent = `Save Media (${total})`;
+      if (mergedVideos.length === 1) {
+        const tag = mergedVideos[0].format === 'm3u8' ? 'M3U8' : String(mergedVideos[0].format || 'MP4').toUpperCase();
+        $('fab-media-label').textContent = `Download Video (${tag})`;
+      } else if (mergedVideos.length > 1) {
+        $('fab-media-label').textContent = `Download Video (${mergedVideos.length} streams)`;
+      } else {
+        $('fab-media-label').textContent = `Save Media (${total})`;
+      }
     } else {
       fab.classList.add('hidden');
     }
@@ -515,13 +613,14 @@
     const vList = $('detected-videos-list');
     clearChildren(vList);
 
-    if (!state.detectedMedia.videos.length) {
+    const mergedVideos = getMergedVideoStreams();
+    if (!mergedVideos.length) {
       vList.appendChild(el('div', {
         className: 'empty-state',
-        text: 'No direct video/audio streams detected yet. Play a video on the page and click Rescan, or paste a media URL above.'
+        text: 'No M3U8/MP4 video streams detected yet. Start playing a video on the page to intercept its stream automatically, or paste a URL above.'
       }));
     } else {
-      for (const vid of state.detectedMedia.videos) {
+      for (const vid of mergedVideos) {
         vList.appendChild(el('div', { className: 'list-card' }, [
           el('div', { className: 'list-card-info' }, [
             el('div', { className: 'list-card-title', text: vid.label || 'Detected Stream' }),
@@ -530,14 +629,12 @@
           el('div', { className: 'list-card-actions' }, [
             el('button', {
               className: 'primary-btn',
-              text: 'Download',
+              text: vid.streamType === 'hls' ? 'Download Stream' : 'Download Video',
               onClick: async () => {
                 try {
-                  toast('Downloading video...');
-                  const rec = await velo.downloadUrl({ url: vid.url, referer });
-                  toast(`Saved ${rec.filename}`);
+                  await triggerStreamDownload(vid);
                 } catch (err) {
-                  toast(`Download failed: ${err.message}`);
+                  toast(`Stream download failed: ${err.message}`);
                 }
               }
             })
@@ -599,7 +696,8 @@
       return;
     }
     for (const d of state.downloads) {
-      const subText = `${d.state.toUpperCase()} • ${formatBytes(d.receivedBytes || d.totalBytes)} • ${d.mimeType || ''}`;
+      const segPart = d.segmentProgress ? ` • Segments ${d.segmentProgress}` : '';
+      const subText = `${d.state.toUpperCase()}${segPart} • ${formatBytes(d.receivedBytes || d.totalBytes)} • ${d.mimeType || ''}`;
       const actions = [
         el('button', {
           className: 'primary-btn',
@@ -1024,27 +1122,49 @@
       });
     });
 
-    // Media Grabber Modal
+    // Media Grabber Modal & Direct Stream Download FAB
     const openMediaModal = async () => {
       await scanActiveWebviewMedia();
       renderDetectedMediaModal();
       openModal('modal-media');
     };
     $('btn-media-grabber').addEventListener('click', openMediaModal);
-    $('fab-save-media').addEventListener('click', openMediaModal);
+    $('fab-save-media').addEventListener('click', async () => {
+      const mergedVideos = getMergedVideoStreams();
+      // If exactly one video stream is detected on the current page, save it directly in one click
+      if (mergedVideos.length === 1) {
+        try {
+          await triggerStreamDownload(mergedVideos[0]);
+        } catch (err) {
+          toast(`Download failed: ${err.message}`);
+          await openMediaModal();
+        }
+      } else {
+        await openMediaModal();
+      }
+    });
     $('btn-rescan-media').addEventListener('click', async () => {
       await scanActiveWebviewMedia();
       renderDetectedMediaModal();
-      toast('Page rescanned for videos & full-size images');
+      toast('Page rescanned for video streams & full-size images');
     });
     $('btn-download-manual').addEventListener('click', async () => {
       const url = $('manual-media-url').value.trim();
       if (!url) return;
       try {
-        toast('Downloading...');
-        const rec = await velo.downloadUrl({ url, referer: getActiveTab()?.url || '' });
+        const isStream = /\.(m3u8|mp4|webm|mkv|mov)(\?|$)/i.test(url);
+        if (isStream) {
+          await triggerStreamDownload({
+            url,
+            format: /\.m3u8(\?|$)/i.test(url) ? 'm3u8' : 'mp4',
+            referer: getActiveTab()?.url || ''
+          });
+        } else {
+          toast('Downloading...');
+          const rec = await velo.downloadUrl({ url, referer: getActiveTab()?.url || '' });
+          toast(`Saved ${rec.filename}`);
+        }
         $('manual-media-url').value = '';
-        toast(`Saved ${rec.filename}`);
       } catch (err) {
         toast(`Download failed: ${err.message}`);
       }
@@ -1362,6 +1482,18 @@
       }
       if (record.state === 'completed') {
         toast(`Downloaded: ${record.filename}`);
+      }
+    });
+
+    velo.onStreamsUpdated(({ webContentsId, streams }) => {
+      const activeWcId = getActiveWebContentsId();
+      if (!activeWcId || Number(webContentsId) !== Number(activeWcId)) {
+        return;
+      }
+      state.interceptedStreams = Array.isArray(streams) ? streams : [];
+      updateMediaBadges();
+      if (!$('modal-media').classList.contains('hidden')) {
+        renderDetectedMediaModal();
       }
     });
 

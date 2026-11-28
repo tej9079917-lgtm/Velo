@@ -261,15 +261,18 @@ class WebViewTabManager(
                         callbacks.onInsecureHttpIntercepted(tab.id, uri.toString())
                         return true
                     }
-                    // Direct PDF links: Android WebView cannot render PDFs inline; download & open in Velo PDF Viewer
+                    // Direct downloadable file links: hand off cleanly to Velo Downloader so files never stall in WebView
                     val pathLower = uri.path?.lowercase().orEmpty()
-                    if ((scheme == "http" || scheme == "https") && pathLower.endsWith(".pdf")) {
+                    val matchedDownloadMime = DIRECT_DOWNLOAD_EXTENSIONS.entries.firstOrNull { (ext, _) ->
+                        pathLower.endsWith(ext)
+                    }?.value
+                    if ((scheme == "http" || scheme == "https") && matchedDownloadMime != null) {
                         callbacks.onDownloadRequested(
                             tab.id,
                             uri.toString(),
                             view?.settings?.userAgentString.orEmpty(),
                             "",
-                            "application/pdf",
+                            matchedDownloadMime,
                             view?.url
                         )
                         return true
@@ -630,7 +633,9 @@ class WebViewTabManager(
                 for (i in 0 until arr.length()) {
                     val item = arr.optJSONObject(i) ?: continue
                     val mediaUrl = item.optString("url", "")
-                    if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
+                    if ((mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) &&
+                        !com.example.media.VideoDownloadEngine.isRestrictedVideoHost(mediaUrl)
+                    ) {
                         val quality = item.optString("quality", "Auto").ifBlank { "Auto" }
                         val playing = item.optBoolean("playing", false)
                         val format = detectFormatLabel(mediaUrl)
@@ -781,16 +786,18 @@ class WebViewTabManager(
         if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
             return null
         }
+        if (com.example.media.VideoDownloadEngine.isRestrictedVideoHost(url)) {
+            return null
+        }
         val lower = url.lowercase()
-        val path = lower.substringBefore('?')
+        val path = lower.substringBefore('?').substringBefore('#')
         val isMedia = path.endsWith(".mp4") ||
             path.endsWith(".webm") ||
             path.endsWith(".m3u8") ||
             path.endsWith(".mkv") ||
             path.endsWith(".mov") ||
             path.endsWith(".m4v") ||
-            lower.contains("mime=video") ||
-            lower.contains("/videoplayback")
+            lower.contains("mime=video")
         if (!isMedia) return null
         val quality = when {
             lower.contains("2160") || lower.contains("4k") -> "4K"
@@ -914,5 +921,28 @@ class WebViewTabManager(
     companion object {
         private const val BLOB_BRIDGE_NAME = "VeloBlobBridge"
         private const val MAX_BRIDGE_CHARS = 40 * 1024 * 1024
+        private val DIRECT_DOWNLOAD_EXTENSIONS = mapOf(
+            ".pdf" to "application/pdf",
+            ".zip" to "application/zip",
+            ".rar" to "application/vnd.rar",
+            ".7z" to "application/x-7z-compressed",
+            ".tar" to "application/x-tar",
+            ".gz" to "application/gzip",
+            ".apk" to "application/vnd.android.package-archive",
+            ".docx" to "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".doc" to "application/msword",
+            ".xlsx" to "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xls" to "application/vnd.ms-excel",
+            ".pptx" to "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".ppt" to "application/vnd.ms-powerpoint",
+            ".epub" to "application/epub+zip",
+            ".mp3" to "audio/mpeg",
+            ".m4a" to "audio/mp4",
+            ".wav" to "audio/wav",
+            ".flac" to "audio/flac",
+            ".ogg" to "audio/ogg",
+            ".aac" to "audio/aac",
+            ".csv" to "text/csv"
+        )
     }
 }
