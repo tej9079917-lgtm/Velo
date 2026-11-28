@@ -98,7 +98,7 @@ class MainActivity : ComponentActivity() {
 
     private fun captureExternalIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
-        val uri = intent.data ?: return
+        val uri = intent.data ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri ?: return
         val scheme = uri.scheme?.lowercase().orEmpty()
         val resolvedMime = resolveIntentMimeType(intent, uri)
 
@@ -113,11 +113,17 @@ class MainActivity : ComponentActivity() {
                 val pathLower = uri.path?.lowercase().orEmpty()
                 val isDirectMediaOrPdf = resolvedMime == "application/pdf" ||
                     resolvedMime?.startsWith("video/") == true ||
-                    pathLower.endsWith(".pdf")
+                    resolvedMime?.startsWith("image/") == true ||
+                    pathLower.endsWith(".pdf") ||
+                    pathLower.endsWith(".mp4")
                 if (isDirectMediaOrPdf) {
                     pendingExternalFile = ExternalOpenRequest(
                         uriString = uri.toString(),
-                        mimeType = resolvedMime ?: if (pathLower.endsWith(".pdf")) "application/pdf" else null
+                        mimeType = resolvedMime ?: when {
+                            pathLower.endsWith(".pdf") -> "application/pdf"
+                            pathLower.endsWith(".mp4") -> "video/mp4"
+                            else -> null
+                        }
                     )
                 } else {
                     pendingExternalUrl = uri.toString()
@@ -129,7 +135,7 @@ class MainActivity : ComponentActivity() {
     private fun resolveIntentMimeType(intent: Intent, uri: android.net.Uri): String? {
         intent.type?.takeIf { it.isNotBlank() && it != "*/*" }?.let { return it }
         try {
-            contentResolver.getType(uri)?.takeIf { it.isNotBlank() }?.let { return it }
+            contentResolver.getType(uri)?.takeIf { it.isNotBlank() && it != "*/*" }?.let { return it }
         } catch (_: Exception) {
         }
         val ext = MimeTypeMap.getFileExtensionFromUrl(uri.toString())?.lowercase().orEmpty()

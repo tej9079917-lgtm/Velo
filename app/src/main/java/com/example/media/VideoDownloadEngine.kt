@@ -49,7 +49,8 @@ data class DownloadedVideoResult(
     val formatLabel: String,
     val qualityLabel: String,
     val byteSize: Long,
-    val savedToPublicDownloads: Boolean = false
+    val savedToPublicDownloads: Boolean = false,
+    val savedToGallery: Boolean = false
 )
 
 /**
@@ -66,6 +67,7 @@ data class DownloadedVideoResult(
 class VideoDownloadEngine(private val context: Context) {
 
     private val downloadsDir = File(context.filesDir, "velo_downloads").apply { mkdirs() }
+    private val sharedStorageManager = VeloDownloadManagerWrapper(context)
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(25, TimeUnit.SECONDS)
@@ -190,7 +192,7 @@ class VideoDownloadEngine(private val context: Context) {
                 .trim()
                 .ifBlank { "Velo_Download_${id.takeLast(4)}" }
             val publicFileName = sanitizePublicFileName("$displayTitle.$ext")
-            val mirrored = saveFileToPublicDownloads(safeFile, publicFileName, resolvedMime)
+            val sharedSave = sharedStorageManager.publishToSharedStorage(safeFile, publicFileName, resolvedMime)
 
             Result.success(
                 DownloadedVideoResult(
@@ -202,7 +204,8 @@ class VideoDownloadEngine(private val context: Context) {
                     formatLabel = formatLabel,
                     qualityLabel = "Saved",
                     byteSize = bytes.size.toLong(),
-                    savedToPublicDownloads = mirrored
+                    savedToPublicDownloads = sharedSave.savedToDownloads,
+                    savedToGallery = sharedSave.savedToGallery
                 )
             )
         } catch (e: Exception) {
@@ -264,7 +267,7 @@ class VideoDownloadEngine(private val context: Context) {
                     out.flush()
                 }
                 val pubName = sanitizePublicFileName("$friendlyTitle.$ext")
-                val mirrored = saveFileToPublicDownloads(safeFile, pubName, resolvedMime)
+                val sharedSave = sharedStorageManager.publishToSharedStorage(safeFile, pubName, resolvedMime)
                 return@withContext Result.success(
                     DownloadedVideoResult(
                         id = id,
@@ -275,7 +278,8 @@ class VideoDownloadEngine(private val context: Context) {
                         formatLabel = fmtLabel,
                         qualityLabel = "Full Size",
                         byteSize = rawBytes.size.toLong(),
-                        savedToPublicDownloads = mirrored
+                        savedToPublicDownloads = sharedSave.savedToDownloads,
+                        savedToGallery = sharedSave.savedToGallery
                     )
                 )
             }
@@ -348,7 +352,7 @@ class VideoDownloadEngine(private val context: Context) {
             }
 
             val pubName = sanitizePublicFileName("$friendlyTitle.${targetFormat.ext}")
-            val mirrored = saveFileToPublicDownloads(safeFile, pubName, targetFormat.mimeType)
+            val sharedSave = sharedStorageManager.publishToSharedStorage(safeFile, pubName, targetFormat.mimeType)
             Result.success(
                 DownloadedVideoResult(
                     id = id,
@@ -359,7 +363,8 @@ class VideoDownloadEngine(private val context: Context) {
                     formatLabel = targetFormat.label,
                     qualityLabel = "Full $resolutionTag",
                     byteSize = safeFile.length(),
-                    savedToPublicDownloads = mirrored
+                    savedToPublicDownloads = sharedSave.savedToDownloads,
+                    savedToGallery = sharedSave.savedToGallery
                 )
             )
         } catch (e: Exception) {
@@ -460,7 +465,7 @@ class VideoDownloadEngine(private val context: Context) {
                     guessedName.substringBeforeLast('.').trim().ifBlank { deriveTitleFromUrl(url) }
                 }
                 val publicFileName = sanitizePublicFileName("$friendlyTitle.$ext")
-                val mirrored = saveFileToPublicDownloads(safeFile, publicFileName, mimeType)
+                val sharedSave = sharedStorageManager.publishToSharedStorage(safeFile, publicFileName, mimeType)
 
                 Result.success(
                     DownloadedVideoResult(
@@ -472,7 +477,8 @@ class VideoDownloadEngine(private val context: Context) {
                         formatLabel = formatLabel,
                         qualityLabel = qualityLabel.ifBlank { formatLabel },
                         byteSize = downloaded,
-                        savedToPublicDownloads = mirrored
+                        savedToPublicDownloads = sharedSave.savedToDownloads,
+                        savedToGallery = sharedSave.savedToGallery
                     )
                 )
             }
@@ -626,7 +632,7 @@ class VideoDownloadEngine(private val context: Context) {
             }
 
             val friendlyTitle = title.trim().ifBlank { deriveTitleFromUrl(playlistUrl) }
-            val mirrored = saveFileToPublicDownloads(
+            val sharedSave = sharedStorageManager.publishToSharedStorage(
                 sourceFile = safeFile,
                 publicFileName = sanitizePublicFileName("$friendlyTitle.$ext"),
                 mimeType = mimeType
@@ -642,7 +648,8 @@ class VideoDownloadEngine(private val context: Context) {
                     formatLabel = formatLabel,
                     qualityLabel = qualityLabel.ifBlank { "Stream" },
                     byteSize = totalDownloaded,
-                    savedToPublicDownloads = mirrored
+                    savedToPublicDownloads = sharedSave.savedToDownloads,
+                    savedToGallery = sharedSave.savedToGallery
                 )
             )
         } catch (e: Exception) {
@@ -737,107 +744,9 @@ class VideoDownloadEngine(private val context: Context) {
         return builder.build()
     }
 
-    /**
-     * Copies any downloaded or converted file into Android's public Downloads/Velo folder:
-     * - API 29+: Uses MediaStore.Downloads with zero permissions, retrying with application/octet-stream
-     *   and root Downloads fallback if an OEM MediaStore rejects a specific MIME type or subfolder.
-     * - API <= 28: Writes directly to public Downloads/Velo when WRITE_EXTERNAL_STORAGE is granted
-     *   and notifies MediaScannerConnection so Files & Gallery index it immediately.
-     */
     fun saveFileToPublicDownloads(sourceFile: File, publicFileName: String, mimeType: String): Boolean {
-        if (!sourceFile.exists() || !sourceFile.isFile) return false
-        val safeName = sanitizePublicFileName(publicFileName)
-        val resolvedMime = mimeType.ifBlank { "application/octet-stream" }
-
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val subPath = "${Environment.DIRECTORY_DOWNLOADS}/Velo/"
-            insertAndCopyToMediaStore(sourceFile, safeName, resolvedMime, subPath) ||
-                insertAndCopyToMediaStore(sourceFile, safeName, "application/octet-stream", subPath) ||
-                insertAndCopyToMediaStore(sourceFile, safeName, "application/octet-stream", "${Environment.DIRECTORY_DOWNLOADS}/")
-        } else {
-            if (!hasPublicDownloadsAccess(context)) return false
-            try {
-                @Suppress("DEPRECATION")
-                val publicRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val veloDir = File(publicRoot, "Velo").apply { mkdirs() }
-                val destDir = if (veloDir.exists() && veloDir.canWrite()) veloDir else publicRoot.apply { mkdirs() }
-                val destFile = resolveUniqueFile(destDir, safeName)
-                FileInputStream(sourceFile).use { input ->
-                    FileOutputStream(destFile).use { out ->
-                        input.copyTo(out, bufferSize = 16 * 1024)
-                        out.flush()
-                    }
-                }
-                MediaScannerConnection.scanFile(
-                    context,
-                    arrayOf(destFile.absolutePath),
-                    arrayOf(resolvedMime),
-                    null
-                )
-                destFile.exists() && destFile.length() > 0L
-            } catch (_: Exception) {
-                false
-            }
-        }
-    }
-
-    private fun insertAndCopyToMediaStore(
-        sourceFile: File,
-        displayName: String,
-        mimeType: String,
-        relativePath: String
-    ): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
-        return try {
-            val resolver = context.contentResolver
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, displayName)
-                put(MediaStore.Downloads.MIME_TYPE, mimeType)
-                put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
-                put(MediaStore.Downloads.IS_PENDING, 1)
-            }
-            val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            val uri = resolver.insert(collection, values) ?: return false
-            try {
-                val outStream = resolver.openOutputStream(uri, "w") ?: resolver.openOutputStream(uri)
-                if (outStream == null) {
-                    resolver.delete(uri, null, null)
-                    return false
-                }
-                outStream.use { out ->
-                    FileInputStream(sourceFile).use { input ->
-                        input.copyTo(out, bufferSize = 16 * 1024)
-                        out.flush()
-                    }
-                }
-                val doneValues = ContentValues().apply {
-                    put(MediaStore.Downloads.IS_PENDING, 0)
-                }
-                resolver.update(uri, doneValues, null, null)
-                true
-            } catch (_: Exception) {
-                try {
-                    resolver.delete(uri, null, null)
-                } catch (_: Exception) {
-                }
-                false
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private fun resolveUniqueFile(dir: File, fileName: String): File {
-        var candidate = File(dir, fileName)
-        if (!candidate.exists()) return candidate
-        val base = fileName.substringBeforeLast('.', fileName)
-        val ext = fileName.substringAfterLast('.', "")
-        for (i in 1..999) {
-            val name = if (ext.isNotBlank() && ext != fileName) "$base ($i).$ext" else "$base ($i)"
-            candidate = File(dir, name)
-            if (!candidate.exists()) return candidate
-        }
-        return File(dir, "${System.currentTimeMillis()}_$fileName")
+        val result = sharedStorageManager.publishToSharedStorage(sourceFile, publicFileName, mimeType)
+        return result.savedToDownloads || result.savedToGallery
     }
 
     private fun fetchText(url: String, referer: String?, userAgent: String?): String? {
@@ -894,35 +803,11 @@ class VideoDownloadEngine(private val context: Context) {
     }
 
     /**
-     * Removes Velo's own mirrored copy from public Downloads/Velo when a user hides
-     * a downloaded item inside the Secret Vault, so it no longer appears in Files or Gallery.
+     * Removes Velo's own mirrored copies from public Downloads/Velo, Pictures/Velo, and Movies/Velo
+     * when a user hides a downloaded item inside the Secret Vault, so it no longer appears in Files or Gallery.
      */
     fun deletePublicDownloadsCopy(displayTitle: String) {
-        val safePrefix = displayTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(60)
-        if (safePrefix.isBlank()) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                context.contentResolver.delete(
-                    collection,
-                    "${MediaStore.Downloads.DISPLAY_NAME} LIKE ? AND ${MediaStore.Downloads.RELATIVE_PATH} LIKE ?",
-                    arrayOf("$safePrefix%", "%Downloads/Velo%")
-                )
-            } catch (_: Exception) {
-            }
-        } else if (hasPublicDownloadsAccess(context)) {
-            try {
-                @Suppress("DEPRECATION")
-                val veloDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Velo")
-                veloDir.listFiles()?.forEach { f ->
-                    if (f.isFile && f.name.startsWith(safePrefix, ignoreCase = true)) {
-                        f.delete()
-                        MediaScannerConnection.scanFile(context, arrayOf(f.absolutePath), null, null)
-                    }
-                }
-            } catch (_: Exception) {
-            }
-        }
+        sharedStorageManager.deleteSharedStorageCopies(displayTitle)
     }
 
     private fun createConfinedFile(fileName: String): File {

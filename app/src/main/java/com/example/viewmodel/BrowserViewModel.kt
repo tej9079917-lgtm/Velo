@@ -1634,7 +1634,8 @@ class BrowserViewModel(
             referer = activeTab.value.url.takeIf { it.startsWith("http") }
         )
         result.onSuccess { enq ->
-            showTransientBanner("Queued \"${enq.fileName}\" in Android DownloadManager (Downloads/Velo).")
+            val destNote = if (enq.savedToPublicDownloads) "Downloads/Velo" else "Velo Downloads"
+            showTransientBanner("Queued \"${enq.fileName}\" in Android DownloadManager ($destNote).")
         }.onFailure { err ->
             showTransientBanner(err.localizedMessage ?: "Unable to queue system download.")
         }
@@ -1771,12 +1772,12 @@ class BrowserViewModel(
         } else {
             "${(done.byteSize / 1024L).coerceAtLeast(1L)} KB"
         }
-        val publicNote = if (done.savedToPublicDownloads) {
-            " • Saved in Downloads/Velo"
-        } else if (!hasPublicStorageAccess()) {
-            " • Tap Allow Storage in Downloads to save in Downloads/Velo"
-        } else {
-            ""
+        val publicNote = when {
+            done.savedToPublicDownloads && done.savedToGallery -> " • Saved in Downloads/Velo & Gallery"
+            done.savedToPublicDownloads -> " • Saved in Downloads/Velo"
+            done.savedToGallery -> " • Saved in Gallery"
+            !hasPublicStorageAccess() -> " • Allow Storage in Downloads to save in Downloads/Velo"
+            else -> ""
         }
 
         if (done.mimeType.equals("application/pdf", ignoreCase = true) ||

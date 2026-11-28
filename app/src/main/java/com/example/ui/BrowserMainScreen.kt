@@ -195,15 +195,19 @@ fun BrowserMainScreen(
     val backgroundAudioActive by viewModel.backgroundAudioActive.collectAsStateWithLifecycle()
 
     var hasPublicStorageAccess by remember { mutableStateOf(viewModel.hasPublicStorageAccess()) }
+    var pendingDownloadAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val legacyStoragePermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         hasPublicStorageAccess = granted || viewModel.hasPublicStorageAccess()
         if (hasPublicStorageAccess) {
-            viewModel.showTransientBanner("Storage access granted — downloads will save to Downloads/Velo.")
+            viewModel.showTransientBanner("Storage access granted — saving to Downloads/Velo & Gallery.")
         } else {
-            viewModel.showTransientBanner("Storage access denied — files will save inside Velo Downloads.")
+            viewModel.showTransientBanner("Storage access denied — saving inside Velo Downloads.")
         }
+        val queued = pendingDownloadAction
+        pendingDownloadAction = null
+        queued?.invoke()
     }
 
     fun requestLegacyStorageIfNeeded() {
@@ -211,6 +215,16 @@ fun BrowserMainScreen(
             legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         } else {
             hasPublicStorageAccess = true
+        }
+    }
+
+    fun runWithStoragePermission(action: () -> Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && !viewModel.hasPublicStorageAccess()) {
+            pendingDownloadAction = action
+            legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            hasPublicStorageAccess = true
+            action()
         }
     }
 
@@ -276,17 +290,21 @@ fun BrowserMainScreen(
                     viewModel.recordDetectedImages(tabId, images)
                 },
                 onDownloadRequested = { _, url, userAgent, contentDisposition, mimeType, referer ->
-                    viewModel.startWebFileDownload(
-                        url = url,
-                        userAgent = userAgent,
-                        contentDisposition = contentDisposition,
-                        mimeType = mimeType,
-                        referer = referer,
-                        autoOpenIfPdf = true
-                    )
+                    runWithStoragePermission {
+                        viewModel.startWebFileDownload(
+                            url = url,
+                            userAgent = userAgent,
+                            contentDisposition = contentDisposition,
+                            mimeType = mimeType,
+                            referer = referer,
+                            autoOpenIfPdf = true
+                        )
+                    }
                 },
                 onInlineDataDownload = { fileName, mimeType, base64Data ->
-                    viewModel.saveInlineDataDownload(fileName, mimeType, base64Data)
+                    runWithStoragePermission {
+                        viewModel.saveInlineDataDownload(fileName, mimeType, base64Data)
+                    }
                 },
                 onImageLongPressed = { imageUrl, referer ->
                     longPressedImage = imageUrl to referer
@@ -1821,13 +1839,19 @@ fun BrowserMainScreen(
                         viewModel.showTransientBanner("Scanned webpage for videos & full-size images.")
                     },
                     onDownloadVideo = { url, title, quality ->
-                        viewModel.startVideoDownload(url, title, quality)
+                        runWithStoragePermission {
+                            viewModel.startVideoDownload(url, title, quality)
+                        }
                     },
                     onSystemDownload = { url, title ->
-                        viewModel.enqueueSystemDownload(url, title)
+                        runWithStoragePermission {
+                            viewModel.enqueueSystemDownload(url, title)
+                        }
                     },
                     onDownloadImageInFormat = { url, title, fmt ->
-                        viewModel.downloadImageInFormat(url, title, fmt)
+                        runWithStoragePermission {
+                            viewModel.downloadImageInFormat(url, title, fmt)
+                        }
                     },
                     onCancelDownload = { viewModel.cancelVideoDownload() },
                     onPlayStream = { media ->
@@ -2036,12 +2060,14 @@ fun BrowserMainScreen(
                             val (imgUrl, referer) = pendingImg
                             val chosenFmt = longPressImageFormat
                             longPressedImage = null
-                            viewModel.downloadImageInFormat(
-                                imageUrl = imgUrl,
-                                title = "",
-                                format = chosenFmt,
-                                referer = referer
-                            )
+                            runWithStoragePermission {
+                                viewModel.downloadImageInFormat(
+                                    imageUrl = imgUrl,
+                                    title = "",
+                                    format = chosenFmt,
+                                    referer = referer
+                                )
+                            }
                         },
                         modifier = Modifier.testTag("confirm_download_image_button")
                     ) {

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <!-- Shareable downloaded media & files (NEVER expose secret_vault or vault_preview) -->
+    <!-- App-internal shareable downloads & converted PDFs (NEVER expose secret_vault or vault_preview) -->
     <files-path
         name="velo_downloads"
         path="velo_downloads/" />
@@ -10,9 +10,24 @@
     <files-path
         name="velo_pdf_images"
         path="velo_pdf_images/" />
+
+    <!-- App-specific external downloads fallback -->
     <external-files-path
         name="velo_ext_downloads"
         path="Download/" />
+
+    <!-- Shared external storage folders written by Velo Browser (Downloads & Gallery) -->
+    <external-path
+        name="velo_public_downloads"
+        path="Download/Velo/" />
+    <external-path
+        name="velo_public_pictures"
+        path="Pictures/Velo/" />
+    <external-path
+        name="velo_public_movies"
+        path="Movies/Velo/" />
+
+    <!-- Temporary share exports cache -->
     <cache-path
         name="velo_shared_exports"
         path="shared_exports/" />
