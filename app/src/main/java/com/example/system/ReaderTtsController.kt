@@ -49,6 +49,10 @@ class ReaderTtsController(context: Context) {
                     override fun onError(utteranceId: String?) {
                         _state.value = _state.value.copy(isSpeaking = false)
                     }
+
+                    override fun onError(utteranceId: String?, errorCode: Int) {
+                        _state.value = _state.value.copy(isSpeaking = false)
+                    }
                 })
             }
             _state.value = _state.value.copy(isReady = ready)

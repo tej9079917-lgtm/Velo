@@ -130,6 +130,111 @@ data class FindInPageState(
     val totalMatches: Int = 0
 )
 
+// --- NEW MEDIA, PDF, SPEED TEST & SECRET MEDIA VAULT MODELS ---
+
+data class DetectedVideoMedia(
+    val url: String,
+    val title: String,
+    val formatLabel: String,
+    val qualityLabel: String,
+    val isPlaying: Boolean = false,
+    val detectedAtMillis: Long = System.currentTimeMillis()
+)
+
+data class DownloadedMediaItem(
+    val id: String,
+    val title: String,
+    val sourceUrl: String,
+    val localPath: String,
+    val mimeType: String,
+    val formatLabel: String,
+    val qualityLabel: String,
+    val byteSize: Long,
+    val createdAtMillis: Long
+)
+
+data class ActiveDownloadProgress(
+    val url: String,
+    val title: String,
+    val downloadedBytes: Long,
+    val totalBytes: Long
+) {
+    val fraction: Float
+        get() = if (totalBytes > 0L) (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f) else -1f
+}
+
+data class VideoPlayerRequest(
+    val title: String,
+    val primarySource: String,
+    val isLocalFile: Boolean,
+    val isAudioOnly: Boolean = false,
+    val qualityVariants: List<Pair<String, String>> = emptyList(),
+    val deleteTempFileOnClose: Boolean = false
+)
+
+data class PdfDocumentItem(
+    val id: String,
+    val title: String,
+    val filePath: String,
+    val pageCount: Int,
+    val byteSize: Long,
+    val createdAtMillis: Long,
+    val deleteTempFileOnClose: Boolean = false
+)
+
+enum class SpeedTestPhase(val label: String) {
+    IDLE("Ready"),
+    PING("Measuring Latency"),
+    DOWNLOAD("Testing Download"),
+    UPLOAD("Testing Upload"),
+    COMPLETE("Complete")
+}
+
+data class SpeedTestLiveState(
+    val phase: SpeedTestPhase = SpeedTestPhase.IDLE,
+    val currentMbps: Double = 0.0,
+    val pingMs: Int = 0,
+    val jitterMs: Int = 0,
+    val downloadMbps: Double = 0.0,
+    val uploadMbps: Double = 0.0,
+    val progress: Float = 0f,
+    val samples: List<Float> = emptyList(),
+    val errorMessage: String? = null
+)
+
+data class SpeedTestRecord(
+    val id: String,
+    val pingMs: Int,
+    val jitterMs: Int,
+    val downloadMbps: Double,
+    val uploadMbps: Double,
+    val connectionType: String,
+    val testedAtMillis: Long
+)
+
+enum class SecretMediaType(val label: String) {
+    VIDEO("Videos"),
+    IMAGE("Images"),
+    PDF("PDFs"),
+    AUDIO("Audios");
+
+    companion object {
+        fun fromWire(raw: String): SecretMediaType =
+            entries.firstOrNull { it.name == raw } ?: IMAGE
+    }
+}
+
+data class SecretMediaItem(
+    val id: String,
+    val displayName: String,
+    val type: SecretMediaType,
+    val mimeType: String,
+    val encryptedFileName: String,
+    val ivBase64: String,
+    val byteSize: Long,
+    val addedAtMillis: Long
+)
+
 enum class ActiveOverlay {
     NONE,
     TAB_SWITCHER,
@@ -141,5 +246,11 @@ enum class ActiveOverlay {
     SCRATCHPAD,
     NETWORK_INSPECTOR,
     FOCUS_TIMER,
-    CLOUD_SIGN_IN
+    CLOUD_SIGN_IN,
+    VIDEO_DOWNLOADER,
+    VIDEO_PLAYER,
+    PDF_TOOLS,
+    SPEED_TEST,
+    SECRET_MEDIA_VAULT,
+    SECRET_VAULT_SETUP
 }

@@ -56,3 +56,42 @@ interface ScratchpadClipDao {
     @Query("DELETE FROM scratchpad_clips WHERE id = :id")
     suspend fun deleteById(id: String)
 }
+
+@Dao
+interface DownloadedMediaDao {
+    @Query("SELECT * FROM downloaded_media ORDER BY createdAtMillis DESC")
+    fun observeDownloads(): Flow<List<DownloadedMediaEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: DownloadedMediaEntity)
+
+    @Query("DELETE FROM downloaded_media WHERE id = :id")
+    suspend fun deleteById(id: String)
+}
+
+@Dao
+interface SecretMediaDao {
+    @Query("SELECT * FROM secret_media_vault ORDER BY addedAtMillis DESC")
+    fun observeSecretMedia(): Flow<List<SecretMediaEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: SecretMediaEntity)
+
+    @Query("DELETE FROM secret_media_vault WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM secret_media_vault")
+    suspend fun deleteAll()
+}
+
+@Dao
+interface SpeedTestHistoryDao {
+    @Query("SELECT * FROM speed_test_history ORDER BY testedAtMillis DESC LIMIT 20")
+    fun observeHistory(): Flow<List<SpeedTestHistoryEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(record: SpeedTestHistoryEntity)
+
+    @Query("DELETE FROM speed_test_history")
+    suspend fun clearAll()
+}

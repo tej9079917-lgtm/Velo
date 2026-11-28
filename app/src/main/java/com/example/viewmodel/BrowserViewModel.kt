@@ -1,39 +1,64 @@
 package com.example.viewmodel
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
+import android.webkit.WebView
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.browser.ActiveDownloadProgress
 import com.example.browser.ActiveOverlay
 import com.example.browser.AdBlockerEngine
 import com.example.browser.BrowserSettings
 import com.example.browser.BrowserTab
+import com.example.browser.DetectedVideoMedia
+import com.example.browser.DownloadedMediaItem
 import com.example.browser.FindInPageState
 import com.example.browser.FocusSessionState
 import com.example.browser.NetworkRequestLog
 import com.example.browser.OfflinePageArchiver
+import com.example.browser.PdfDocumentItem
 import com.example.browser.ReaderArticle
 import com.example.browser.ReadingListItem
 import com.example.browser.ScratchpadClip
 import com.example.browser.SearchEngine
+import com.example.browser.SecretMediaItem
+import com.example.browser.SecretMediaType
 import com.example.browser.ShortcutItem
+import com.example.browser.SpeedTestLiveState
+import com.example.browser.SpeedTestPhase
+import com.example.browser.SpeedTestRecord
 import com.example.browser.SplitPane
 import com.example.browser.ThemeMode
 import com.example.browser.VaultCredential
+import com.example.browser.VideoPlayerRequest
 import com.example.crypto.E2EECryptoEngine
+import com.example.crypto.SecretMediaVaultManager
 import com.example.data.local.CachedPageDao
 import com.example.data.local.CachedPageEntity
+import com.example.data.local.DownloadedMediaDao
+import com.example.data.local.DownloadedMediaEntity
 import com.example.data.local.LocalPreferencesStore
 import com.example.data.local.LocalShortcutDao
 import com.example.data.local.LocalShortcutEntity
 import com.example.data.local.ScratchpadClipDao
 import com.example.data.local.ScratchpadClipEntity
+import com.example.data.local.SecretMediaDao
+import com.example.data.local.SecretMediaEntity
+import com.example.data.local.SecretVaultConfig
+import com.example.data.local.SpeedTestHistoryDao
+import com.example.data.local.SpeedTestHistoryEntity
 import com.example.data.remote.BrowserPreferencesDoc
 import com.example.data.remote.ReadingPageDoc
 import com.example.data.remote.ShortcutDoc
 import com.example.data.remote.VaultConfigDoc
 import com.example.data.remote.VaultItemDoc
 import com.example.data.remote.VeloSyncRepository
+import com.example.media.PdfEngine
+import com.example.media.SpeedTestEngine
+import com.example.media.VideoDownloadEngine
 import com.example.system.NetworkConnectivityObserver
 import com.example.system.VeloNotificationManager
 import com.google.firebase.Timestamp
@@ -76,14 +101,22 @@ data class DecryptedOfflineReaderState(
 )
 
 class BrowserViewModel(
+    private val appContext: Context,
     private val syncRepository: VeloSyncRepository?,
     private val cachedPageDao: CachedPageDao,
     private val localShortcutDao: LocalShortcutDao,
     private val scratchpadClipDao: ScratchpadClipDao,
+    private val downloadedMediaDao: DownloadedMediaDao,
+    private val secretMediaDao: SecretMediaDao,
+    private val speedTestHistoryDao: SpeedTestHistoryDao,
     private val localPrefs: LocalPreferencesStore,
     private val offlineArchiver: OfflinePageArchiver,
     private val notificationManager: VeloNotificationManager,
     private val connectivityObserver: NetworkConnectivityObserver,
+    private val videoDownloadEngine: VideoDownloadEngine,
+    val pdfEngine: PdfEngine,
+    private val speedTestEngine: SpeedTestEngine,
+    private val secretVaultManager: SecretMediaVaultManager,
     val currentUserId: String?
 ) : ViewModel() {
 
@@ -172,6 +205,105 @@ class BrowserViewModel(
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // --- VIDEO DETECTOR, DOWNLOADER & PLAYER STATE ---
+    private val _detectedVideosByTab = MutableStateFlow<Map<String, List<DetectedVideoMedia>>>(emptyMap())
+    val detectedVideosForActiveTab: StateFlow<List<DetectedVideoMedia>> =
+        combine(activeTab, _detectedVideosByTab) { tab, map ->
+            map[tab.id].orEmpty()
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val downloadedMedia: StateFlow<List<DownloadedMediaItem>> = downloadedMediaDao.observeDownloads()
+        .map { list ->
+            list.map { e ->
+                DownloadedMediaItem(
+                    id = e.id,
+                    title = e.title,
+                    sourceUrl = e.sourceUrl,
+                    localPath = e.localPath,
+                    mimeType = e.mimeType,
+                    formatLabel = e.formatLabel,
+                    qualityLabel = e.qualityLabel,
+                    byteSize = e.byteSize,
+                    createdAtMillis = e.createdAtMillis
+                )
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _activeDownload = MutableStateFlow<ActiveDownloadProgress?>(null)
+    val activeDownload: StateFlow<ActiveDownloadProgress?> = _activeDownload.asStateFlow()
+    private var downloadJob: Job? = null
+
+    private val _videoPlayerRequest = MutableStateFlow<VideoPlayerRequest?>(null)
+    val videoPlayerRequest: StateFlow<VideoPlayerRequest?> = _videoPlayerRequest.asStateFlow()
+    private var returnOverlayAfterMedia: ActiveOverlay = ActiveOverlay.NONE
+
+    // --- PDF VIEWER & CONVERTER STATE ---
+    private val _savedPdfs = MutableStateFlow<List<PdfDocumentItem>>(emptyList())
+    val savedPdfs: StateFlow<List<PdfDocumentItem>> = _savedPdfs.asStateFlow()
+
+    private val _activePdfDocument = MutableStateFlow<PdfDocumentItem?>(null)
+    val activePdfDocument: StateFlow<PdfDocumentItem?> = _activePdfDocument.asStateFlow()
+
+    private val _isPdfBusy = MutableStateFlow(false)
+    val isPdfBusy: StateFlow<Boolean> = _isPdfBusy.asStateFlow()
+
+    // --- SPEED TEST METER STATE ---
+    private val _speedTestState = MutableStateFlow(SpeedTestLiveState())
+    val speedTestState: StateFlow<SpeedTestLiveState> = _speedTestState.asStateFlow()
+    private var speedTestJob: Job? = null
+
+    val speedTestHistory: StateFlow<List<SpeedTestRecord>> = speedTestHistoryDao.observeHistory()
+        .map { list ->
+            list.map { e ->
+                SpeedTestRecord(
+                    id = e.id,
+                    pingMs = e.pingMs,
+                    jitterMs = e.jitterMs,
+                    downloadMbps = e.downloadMbps,
+                    uploadMbps = e.uploadMbps,
+                    connectionType = e.connectionType,
+                    testedAtMillis = e.testedAtMillis
+                )
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // --- SECRET MEDIA VAULT STATE (UNLOCKED VIA OMNIBOX SECRET CODE) ---
+    val secretVaultConfig: StateFlow<SecretVaultConfig?> = localPrefs.secretVaultConfigFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    private val _secretVaultKey = MutableStateFlow<SecretKey?>(null)
+    val isSecretVaultUnlocked: StateFlow<Boolean> = _secretVaultKey
+        .map { it != null }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    private val _secretVaultBusy = MutableStateFlow(false)
+    val secretVaultBusy: StateFlow<Boolean> = _secretVaultBusy.asStateFlow()
+
+    private val _secretVaultError = MutableStateFlow<String?>(null)
+    val secretVaultError: StateFlow<String?> = _secretVaultError.asStateFlow()
+
+    val secretMediaItems: StateFlow<List<SecretMediaItem>> = secretMediaDao.observeSecretMedia()
+        .map { list ->
+            list.map { e ->
+                SecretMediaItem(
+                    id = e.id,
+                    displayName = e.displayName,
+                    type = SecretMediaType.fromWire(e.mediaType),
+                    mimeType = e.mimeType,
+                    encryptedFileName = e.encryptedFileName,
+                    ivBase64 = e.ivBase64,
+                    byteSize = e.byteSize,
+                    addedAtMillis = e.addedAtMillis
+                )
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _secretImagePreview = MutableStateFlow<Pair<SecretMediaItem, ByteArray>?>(null)
+    val secretImagePreview: StateFlow<Pair<SecretMediaItem, ByteArray>?> = _secretImagePreview.asStateFlow()
 
     // --- CONNECTIVITY ---
     val isOnline: StateFlow<Boolean> = connectivityObserver.observeOnlineStatus()
@@ -361,6 +493,7 @@ class BrowserViewModel(
     init {
         viewModelScope.launch {
             seedLocalDefaultShortcutsIfEmpty()
+            refreshSavedPdfs()
             if (currentUserId != null && syncRepository != null) {
                 syncRepository.ensurePreferencesExist(currentUserId)
             }
@@ -604,6 +737,7 @@ class BrowserViewModel(
                 }
             }
         }
+        _detectedVideosByTab.update { it - tabId }
     }
 
     fun wipeAllPrivateTabs(onWipePrivateWebViews: (List<String>) -> Unit) {
@@ -644,6 +778,7 @@ class BrowserViewModel(
                 ) else it
             }
         }
+        _detectedVideosByTab.update { it - tabId }
     }
 
     fun resolveInputToUrl(rawInput: String): String {
@@ -680,6 +815,7 @@ class BrowserViewModel(
                 ) else it
             }
         }
+        _detectedVideosByTab.update { it - tabId }
     }
 
     fun updateTabProgress(tabId: String, progress: Int) {
@@ -1404,9 +1540,710 @@ class BrowserViewModel(
             .firstOrNull()
     }
 
+    // --- VIDEO DETECTOR, DOWNLOADER & PLAYER ---
+
+    fun recordDetectedVideo(tabId: String, media: DetectedVideoMedia) {
+        _detectedVideosByTab.update { currentMap ->
+            val list = currentMap[tabId].orEmpty().toMutableList()
+            val existingIdx = list.indexOfFirst { it.url == media.url }
+            if (existingIdx >= 0) {
+                val old = list[existingIdx]
+                list[existingIdx] = old.copy(
+                    title = media.title.ifBlank { old.title },
+                    qualityLabel = if (media.qualityLabel != "Auto") media.qualityLabel else old.qualityLabel,
+                    isPlaying = media.isPlaying || old.isPlaying
+                )
+            } else {
+                list.add(0, media)
+                if (list.size > 15) {
+                    list.removeAt(list.lastIndex)
+                }
+            }
+            currentMap + (tabId to list)
+        }
+    }
+
+    fun startVideoDownload(url: String, title: String, qualityLabel: String = "HD") {
+        val cleanUrl = url.trim()
+        if (!cleanUrl.startsWith("http://", ignoreCase = true) && !cleanUrl.startsWith("https://", ignoreCase = true)) {
+            showTransientBanner("Enter a valid HTTP or HTTPS video URL.")
+            return
+        }
+        downloadJob?.cancel()
+        videoDownloadEngine.cancelActiveDownload()
+        val displayTitle = title.trim().ifBlank { VideoDownloadEngine.deriveTitleFromUrl(cleanUrl) }
+        _activeDownload.value = ActiveDownloadProgress(
+            url = cleanUrl,
+            title = displayTitle,
+            downloadedBytes = 0L,
+            totalBytes = -1L
+        )
+        downloadJob = viewModelScope.launch {
+            val result = videoDownloadEngine.downloadVideo(
+                rawUrl = cleanUrl,
+                title = displayTitle,
+                qualityLabel = qualityLabel,
+                onProgress = { downloaded, total ->
+                    _activeDownload.value = ActiveDownloadProgress(
+                        url = cleanUrl,
+                        title = displayTitle,
+                        downloadedBytes = downloaded,
+                        totalBytes = total
+                    )
+                }
+            )
+            _activeDownload.value = null
+            result.onSuccess { done ->
+                downloadedMediaDao.upsert(
+                    DownloadedMediaEntity(
+                        id = done.id,
+                        title = done.title,
+                        sourceUrl = done.sourceUrl,
+                        localPath = done.localPath,
+                        mimeType = done.mimeType,
+                        formatLabel = done.formatLabel,
+                        qualityLabel = done.qualityLabel,
+                        byteSize = done.byteSize
+                    )
+                )
+                val mb = done.byteSize / (1024.0 * 1024.0)
+                showTransientBanner("Downloaded \"${done.title}\" (${"%.1f".format(mb)} MB).")
+            }.onFailure { err ->
+                if (err !is CancellationException) {
+                    showTransientBanner(err.localizedMessage ?: "Video download failed.")
+                }
+            }
+        }
+    }
+
+    fun cancelVideoDownload() {
+        videoDownloadEngine.cancelActiveDownload()
+        downloadJob?.cancel()
+        downloadJob = null
+        _activeDownload.value = null
+        showTransientBanner("Video download canceled.")
+    }
+
+    fun deleteDownloadedMedia(item: DownloadedMediaItem) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                videoDownloadEngine.deleteLocalFile(item.localPath)
+            }
+            downloadedMediaDao.deleteById(item.id)
+            showTransientBanner("Deleted \"${item.title}\".")
+        }
+    }
+
+    fun openVideoPlayer(
+        request: VideoPlayerRequest,
+        returnTo: ActiveOverlay = ActiveOverlay.NONE
+    ) {
+        returnOverlayAfterMedia = returnTo
+        _videoPlayerRequest.value = request
+        _activeOverlay.value = ActiveOverlay.VIDEO_PLAYER
+    }
+
+    fun closeVideoPlayer() {
+        val req = _videoPlayerRequest.value
+        if (req?.deleteTempFileOnClose == true) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    java.io.File(req.primarySource).delete()
+                } catch (_: Exception) {
+                }
+                secretVaultManager.wipeAllTempPreviews()
+            }
+        }
+        _videoPlayerRequest.value = null
+        val target = if (returnOverlayAfterMedia == ActiveOverlay.SECRET_MEDIA_VAULT && _secretVaultKey.value != null) {
+            ActiveOverlay.SECRET_MEDIA_VAULT
+        } else {
+            returnOverlayAfterMedia
+        }
+        returnOverlayAfterMedia = ActiveOverlay.NONE
+        _activeOverlay.value = target
+    }
+
+    // --- PDF VIEWER & CONVERTER ---
+
+    fun refreshSavedPdfs() {
+        viewModelScope.launch {
+            _savedPdfs.value = pdfEngine.listSavedPdfs()
+        }
+    }
+
+    fun openPdfDocument(
+        item: PdfDocumentItem,
+        returnTo: ActiveOverlay = ActiveOverlay.PDF_TOOLS
+    ) {
+        returnOverlayAfterMedia = returnTo
+        _activePdfDocument.value = item
+        _activeOverlay.value = ActiveOverlay.PDF_TOOLS
+    }
+
+    fun closeActivePdfDocument() {
+        val active = _activePdfDocument.value
+        if (active?.deleteTempFileOnClose == true) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    java.io.File(active.filePath).delete()
+                } catch (_: Exception) {
+                }
+                secretVaultManager.wipeAllTempPreviews()
+            }
+        }
+        _activePdfDocument.value = null
+        if (returnOverlayAfterMedia == ActiveOverlay.SECRET_MEDIA_VAULT && _secretVaultKey.value != null) {
+            returnOverlayAfterMedia = ActiveOverlay.NONE
+            _activeOverlay.value = ActiveOverlay.SECRET_MEDIA_VAULT
+        }
+    }
+
+    fun importPdfFromUri(uri: Uri) {
+        viewModelScope.launch {
+            _isPdfBusy.value = true
+            try {
+                pdfEngine.importPdfFromUri(uri)
+                    .onSuccess { doc ->
+                        refreshSavedPdfs()
+                        _activePdfDocument.value = doc
+                        showTransientBanner("Opened PDF \"${doc.title}\" (${doc.pageCount} pages).")
+                    }
+                    .onFailure { err ->
+                        showTransientBanner(err.localizedMessage ?: "Unable to open PDF.")
+                    }
+            } finally {
+                _isPdfBusy.value = false
+            }
+        }
+    }
+
+    fun convertImagesToPdf(uris: List<Uri>, title: String) {
+        viewModelScope.launch {
+            _isPdfBusy.value = true
+            try {
+                pdfEngine.convertImagesToPdf(uris, title)
+                    .onSuccess { doc ->
+                        refreshSavedPdfs()
+                        _activePdfDocument.value = doc
+                        showTransientBanner("Created PDF \"${doc.title}\" (${doc.pageCount} pages).")
+                    }
+                    .onFailure { err ->
+                        showTransientBanner(err.localizedMessage ?: "Image-to-PDF conversion failed.")
+                    }
+            } finally {
+                _isPdfBusy.value = false
+            }
+        }
+    }
+
+    fun convertTextToPdf(title: String, body: String) {
+        viewModelScope.launch {
+            _isPdfBusy.value = true
+            try {
+                pdfEngine.convertTextToPdf(title, body)
+                    .onSuccess { doc ->
+                        refreshSavedPdfs()
+                        _activePdfDocument.value = doc
+                        showTransientBanner("Converted text to PDF \"${doc.title}\".")
+                    }
+                    .onFailure { err ->
+                        showTransientBanner(err.localizedMessage ?: "Text-to-PDF conversion failed.")
+                    }
+            } finally {
+                _isPdfBusy.value = false
+            }
+        }
+    }
+
+    fun convertActiveWebViewToPdf(webView: WebView?, title: String) {
+        if (webView == null) {
+            showTransientBanner("Open a webpage first to save it as a PDF.")
+            return
+        }
+        viewModelScope.launch {
+            _isPdfBusy.value = true
+            try {
+                pdfEngine.convertWebViewToPdf(webView, title)
+                    .onSuccess { doc ->
+                        refreshSavedPdfs()
+                        _activePdfDocument.value = doc
+                        showTransientBanner("Saved webpage as PDF (${doc.pageCount} pages).")
+                    }
+                    .onFailure { err ->
+                        showTransientBanner(err.localizedMessage ?: "Webpage-to-PDF failed.")
+                    }
+            } finally {
+                _isPdfBusy.value = false
+            }
+        }
+    }
+
+    fun extractPdfToPngImages(item: PdfDocumentItem) {
+        viewModelScope.launch {
+            _isPdfBusy.value = true
+            try {
+                pdfEngine.convertPdfToPngImages(item.filePath)
+                    .onSuccess { files ->
+                        showTransientBanner("Extracted ${files.size} PNG page images from \"${item.title}\".")
+                    }
+                    .onFailure { err ->
+                        showTransientBanner(err.localizedMessage ?: "PDF-to-Images extraction failed.")
+                    }
+            } finally {
+                _isPdfBusy.value = false
+            }
+        }
+    }
+
+    fun exportPdfToUri(item: PdfDocumentItem, destUri: Uri) {
+        viewModelScope.launch {
+            pdfEngine.exportPdfToUri(item.filePath, destUri)
+                .onSuccess { showTransientBanner("Exported \"${item.title}.pdf\" successfully.") }
+                .onFailure { showTransientBanner(it.localizedMessage ?: "PDF export failed.") }
+        }
+    }
+
+    fun deletePdfDocument(item: PdfDocumentItem) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { pdfEngine.deletePdf(item.filePath) }
+            if (_activePdfDocument.value?.id == item.id) {
+                _activePdfDocument.value = null
+            }
+            refreshSavedPdfs()
+            showTransientBanner("Deleted PDF \"${item.title}\".")
+        }
+    }
+
+    // --- INTERNET SPEED TEST METER ---
+
+    fun startSpeedTest() {
+        speedTestJob?.cancel()
+        speedTestJob = viewModelScope.launch {
+            val result = speedTestEngine.runSpeedTest { liveState ->
+                _speedTestState.value = liveState
+            }
+            result.onSuccess { rec ->
+                speedTestHistoryDao.insert(
+                    SpeedTestHistoryEntity(
+                        id = rec.id,
+                        pingMs = rec.pingMs,
+                        jitterMs = rec.jitterMs,
+                        downloadMbps = rec.downloadMbps,
+                        uploadMbps = rec.uploadMbps,
+                        connectionType = rec.connectionType,
+                        testedAtMillis = rec.testedAtMillis
+                    )
+                )
+            }.onFailure { err ->
+                if (err !is CancellationException) {
+                    _speedTestState.value = SpeedTestLiveState(
+                        phase = SpeedTestPhase.IDLE,
+                        errorMessage = err.localizedMessage ?: "Speed test failed."
+                    )
+                }
+            }
+        }
+    }
+
+    fun stopSpeedTest() {
+        speedTestJob?.cancel()
+        speedTestJob = null
+        _speedTestState.value = SpeedTestLiveState(phase = SpeedTestPhase.IDLE)
+    }
+
+    fun clearSpeedTestHistory() {
+        viewModelScope.launch {
+            speedTestHistoryDao.clearAll()
+            showTransientBanner("Speed test history cleared.")
+        }
+    }
+
+    // --- SECRET MEDIA VAULT (ACCESSED ONLY VIA SEARCH BAR SECRET CODE) ---
+
+    fun clearSecretVaultError() {
+        _secretVaultError.value = null
+    }
+
+    /**
+     * Checks whether raw search-bar input matches the user's Secret Media Vault code.
+     * NEVER sends a matched code to the web, search engine, or tab history.
+     * If no custom code is configured yet, typing "#0000" opens first-time Secret Code setup.
+     */
+    fun handleOmniboxInput(
+        rawInput: String,
+        onSecretVaultTriggered: () -> Unit,
+        onProceedToWebNavigation: () -> Unit
+    ) {
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty()) return
+
+        val lower = trimmed.lowercase()
+        val isExplicitUrl = lower.startsWith("http://") || lower.startsWith("https://")
+        val isCandidateCode = !isExplicitUrl && !trimmed.contains(" ") && trimmed.length in 4..24
+
+        if (!isCandidateCode) {
+            onProceedToWebNavigation()
+            return
+        }
+
+        val existingConfig = secretVaultConfig.value
+        if (existingConfig == null) {
+            if (trimmed == SecretMediaVaultManager.DEFAULT_SETUP_CODE) {
+                onSecretVaultTriggered()
+                _secretVaultError.value = null
+                _activeOverlay.value = ActiveOverlay.SECRET_VAULT_SETUP
+                return
+            }
+            onProceedToWebNavigation()
+            return
+        }
+
+        // Verify candidate code against PBKDF2 verifier off the main thread
+        viewModelScope.launch {
+            val derivedKey = withContext(Dispatchers.Default) {
+                secretVaultManager.verifyAndDeriveKey(trimmed, existingConfig)
+            }
+            if (derivedKey != null) {
+                onSecretVaultTriggered()
+                _secretVaultKey.value = derivedKey
+                _secretVaultError.value = null
+                _activeOverlay.value = ActiveOverlay.SECRET_MEDIA_VAULT
+            } else {
+                onProceedToWebNavigation()
+            }
+        }
+    }
+
+    fun setupOrChangeSecretCode(
+        newCode: String,
+        confirmCode: String,
+        currentCode: String = ""
+    ) {
+        val cleanNew = newCode.trim()
+        if (cleanNew.length !in 4..24 || cleanNew.contains(" ")) {
+            _secretVaultError.value = "Secret code must be 4–24 characters with no spaces (e.g. #4829)."
+            return
+        }
+        if (cleanNew != confirmCode.trim()) {
+            _secretVaultError.value = "Secret codes do not match."
+            return
+        }
+
+        viewModelScope.launch {
+            _secretVaultBusy.value = true
+            _secretVaultError.value = null
+            try {
+                val existingConfig = secretVaultConfig.value
+                val oldKey: SecretKey? = if (existingConfig != null) {
+                    _secretVaultKey.value ?: withContext(Dispatchers.Default) {
+                        secretVaultManager.verifyAndDeriveKey(currentCode.trim(), existingConfig)
+                    }
+                } else null
+
+                if (existingConfig != null && oldKey == null) {
+                    _secretVaultError.value = "Current secret code is incorrect."
+                    return@launch
+                }
+
+                val (newConfig, newKey) = withContext(Dispatchers.Default) {
+                    secretVaultManager.createVaultConfigForCode(cleanNew)
+                }
+
+                // Re-encrypt existing hidden files if changing an existing code
+                if (oldKey != null && secretMediaItems.value.isNotEmpty()) {
+                    val rekeyRes = secretVaultManager.reEncryptAllFiles(
+                        items = secretMediaItems.value,
+                        oldKey = oldKey,
+                        newKey = newKey
+                    )
+                    val updatedMap = rekeyRes.getOrElse { err ->
+                        _secretVaultError.value = err.localizedMessage ?: "Failed to re-encrypt vault files."
+                        return@launch
+                    }
+                    secretMediaItems.value.forEach { item ->
+                        val updated = updatedMap[item.id] ?: return@forEach
+                        secretMediaDao.upsert(
+                            SecretMediaEntity(
+                                id = item.id,
+                                displayName = item.displayName,
+                                mediaType = item.type.name,
+                                mimeType = item.mimeType,
+                                encryptedFileName = updated.first,
+                                ivBase64 = updated.second,
+                                byteSize = item.byteSize,
+                                addedAtMillis = item.addedAtMillis
+                            )
+                        )
+                    }
+                }
+
+                localPrefs.saveSecretVaultConfig(newConfig)
+                _secretVaultKey.value = newKey
+                _activeOverlay.value = ActiveOverlay.SECRET_MEDIA_VAULT
+                showTransientBanner("Secret Vault active — type your code in the search bar anytime to open.")
+            } finally {
+                _secretVaultBusy.value = false
+            }
+        }
+    }
+
+    fun hideUrisInSecretVault(uris: List<Uri>, forcedType: SecretMediaType? = null) {
+        val key = _secretVaultKey.value
+        if (key == null) {
+            showTransientBanner("Unlock Secret Vault first by typing your code in the search bar.")
+            return
+        }
+        if (uris.isEmpty()) return
+
+        viewModelScope.launch {
+            _secretVaultBusy.value = true
+            var hiddenCount = 0
+            try {
+                for (uri in uris) {
+                    val mime = appContext.contentResolver.getType(uri).orEmpty()
+                    val name = resolveUriDisplayName(uri) ?: "Hidden_File_${System.currentTimeMillis() % 10000}"
+                    val mediaType = forcedType ?: inferSecretMediaType(mime, name)
+
+                    val encResult = withContext(Dispatchers.IO) {
+                        appContext.contentResolver.openInputStream(uri)?.use { input ->
+                            secretVaultManager.encryptStreamToVault(input, key)
+                        } ?: Result.failure(IllegalStateException("Could not read selected file."))
+                    }
+
+                    encResult.onSuccess { enc ->
+                        secretMediaDao.upsert(
+                            SecretMediaEntity(
+                                id = "sec_${UUID.randomUUID().toString().take(10)}",
+                                displayName = name.take(80),
+                                mediaType = mediaType.name,
+                                mimeType = mime.ifBlank { defaultMimeFor(mediaType) },
+                                encryptedFileName = enc.encryptedFileName,
+                                ivBase64 = enc.ivBase64,
+                                byteSize = enc.plaintextByteSize
+                            )
+                        )
+                        hiddenCount++
+                    }
+                }
+                if (hiddenCount > 0) {
+                    showTransientBanner("Encrypted & hid $hiddenCount item(s) inside Secret Vault.")
+                } else {
+                    showTransientBanner("Could not import selected media into Secret Vault.")
+                }
+            } finally {
+                _secretVaultBusy.value = false
+            }
+        }
+    }
+
+    fun hideLocalFileInSecretVault(
+        filePath: String,
+        displayName: String,
+        type: SecretMediaType,
+        mimeType: String,
+        onOriginalHidden: (() -> Unit)? = null
+    ) {
+        val key = _secretVaultKey.value
+        if (key == null) {
+            if (secretVaultConfig.value == null) {
+                _activeOverlay.value = ActiveOverlay.SECRET_VAULT_SETUP
+                showTransientBanner("Set a Secret Code first to hide files in the Secret Vault.")
+            } else {
+                showTransientBanner("Type your secret code in the search bar to unlock the Vault first.")
+            }
+            return
+        }
+        viewModelScope.launch {
+            _secretVaultBusy.value = true
+            try {
+                val file = java.io.File(filePath)
+                if (!file.exists()) {
+                    showTransientBanner("File no longer exists on device.")
+                    return@launch
+                }
+                val encResult = withContext(Dispatchers.IO) {
+                    file.inputStream().buffered().use { input ->
+                        secretVaultManager.encryptStreamToVault(input, key)
+                    }
+                }
+                encResult.onSuccess { enc ->
+                    secretMediaDao.upsert(
+                        SecretMediaEntity(
+                            id = "sec_${UUID.randomUUID().toString().take(10)}",
+                            displayName = displayName.take(80),
+                            mediaType = type.name,
+                            mimeType = mimeType.ifBlank { defaultMimeFor(type) },
+                            encryptedFileName = enc.encryptedFileName,
+                            ivBase64 = enc.ivBase64,
+                            byteSize = enc.plaintextByteSize
+                        )
+                    )
+                    onOriginalHidden?.invoke()
+                    showTransientBanner("Encrypted \"$displayName\" into Secret Vault.")
+                }.onFailure { err ->
+                    showTransientBanner(err.localizedMessage ?: "Failed to encrypt file.")
+                }
+            } finally {
+                _secretVaultBusy.value = false
+            }
+        }
+    }
+
+    fun openSecretMediaItem(item: SecretMediaItem) {
+        val key = _secretVaultKey.value ?: return
+        viewModelScope.launch {
+            _secretVaultBusy.value = true
+            try {
+                when (item.type) {
+                    SecretMediaType.IMAGE -> {
+                        secretVaultManager.decryptVaultFileToBytes(item.encryptedFileName, item.ivBase64, key)
+                            .onSuccess { bytes -> _secretImagePreview.value = item to bytes }
+                            .onFailure { showTransientBanner("Unable to decrypt image.") }
+                    }
+                    SecretMediaType.VIDEO, SecretMediaType.AUDIO -> {
+                        val ext = extensionForMime(item.mimeType, item.type)
+                        secretVaultManager.decryptVaultFileToTempPreview(item.encryptedFileName, item.ivBase64, ext, key)
+                            .onSuccess { tempFile ->
+                                openVideoPlayer(
+                                    request = VideoPlayerRequest(
+                                        title = item.displayName,
+                                        primarySource = tempFile.canonicalPath,
+                                        isLocalFile = true,
+                                        isAudioOnly = item.type == SecretMediaType.AUDIO,
+                                        deleteTempFileOnClose = true
+                                    ),
+                                    returnTo = ActiveOverlay.SECRET_MEDIA_VAULT
+                                )
+                            }
+                            .onFailure { showTransientBanner("Unable to decrypt media for playback.") }
+                    }
+                    SecretMediaType.PDF -> {
+                        secretVaultManager.decryptVaultFileToTempPreview(item.encryptedFileName, item.ivBase64, "pdf", key)
+                            .onSuccess { tempFile ->
+                                val pages = pdfEngine.getPageCount(tempFile.canonicalPath).coerceAtLeast(1)
+                                openPdfDocument(
+                                    item = PdfDocumentItem(
+                                        id = item.id,
+                                        title = item.displayName,
+                                        filePath = tempFile.canonicalPath,
+                                        pageCount = pages,
+                                        byteSize = item.byteSize,
+                                        createdAtMillis = item.addedAtMillis,
+                                        deleteTempFileOnClose = true
+                                    ),
+                                    returnTo = ActiveOverlay.SECRET_MEDIA_VAULT
+                                )
+                            }
+                            .onFailure { showTransientBanner("Unable to decrypt PDF document.") }
+                    }
+                }
+            } finally {
+                _secretVaultBusy.value = false
+            }
+        }
+    }
+
+    fun closeSecretImagePreview() {
+        _secretImagePreview.value = null
+    }
+
+    fun exportSecretMediaItem(item: SecretMediaItem, destUri: Uri) {
+        val key = _secretVaultKey.value ?: return
+        viewModelScope.launch {
+            _secretVaultBusy.value = true
+            try {
+                val res = withContext(Dispatchers.IO) {
+                    appContext.contentResolver.openOutputStream(destUri)?.use { out ->
+                        secretVaultManager.decryptVaultFileToStream(item.encryptedFileName, item.ivBase64, key, out)
+                    } ?: Result.failure(IllegalStateException("Could not open export destination."))
+                }
+                res.onSuccess { showTransientBanner("Exported \"${item.displayName}\" from Secret Vault.") }
+                    .onFailure { showTransientBanner(it.localizedMessage ?: "Export failed.") }
+            } finally {
+                _secretVaultBusy.value = false
+            }
+        }
+    }
+
+    fun deleteSecretMediaItem(item: SecretMediaItem) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                secretVaultManager.deleteVaultFile(item.encryptedFileName)
+            }
+            secretMediaDao.deleteById(item.id)
+            if (_secretImagePreview.value?.first?.id == item.id) {
+                _secretImagePreview.value = null
+            }
+            showTransientBanner("Permanently erased \"${item.displayName}\" from Secret Vault.")
+        }
+    }
+
+    fun lockSecretMediaVault() {
+        _secretVaultKey.value = null
+        _secretImagePreview.value = null
+        secretVaultManager.wipeAllTempPreviews()
+        if (_activeOverlay.value == ActiveOverlay.SECRET_MEDIA_VAULT ||
+            _activeOverlay.value == ActiveOverlay.SECRET_VAULT_SETUP
+        ) {
+            _activeOverlay.value = ActiveOverlay.NONE
+        }
+    }
+
+    private fun resolveUriDisplayName(uri: Uri): String? {
+        return try {
+            appContext.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun inferSecretMediaType(mime: String, name: String): SecretMediaType {
+        val m = mime.lowercase()
+        val n = name.lowercase()
+        return when {
+            m.startsWith("video/") || n.endsWith(".mp4") || n.endsWith(".mkv") || n.endsWith(".webm") || n.endsWith(".mov") ->
+                SecretMediaType.VIDEO
+            m.startsWith("audio/") || n.endsWith(".mp3") || n.endsWith(".m4a") || n.endsWith(".wav") || n.endsWith(".ogg") || n.endsWith(".flac") ->
+                SecretMediaType.AUDIO
+            m == "application/pdf" || n.endsWith(".pdf") ->
+                SecretMediaType.PDF
+            else -> SecretMediaType.IMAGE
+        }
+    }
+
+    private fun defaultMimeFor(type: SecretMediaType): String = when (type) {
+        SecretMediaType.VIDEO -> "video/mp4"
+        SecretMediaType.IMAGE -> "image/jpeg"
+        SecretMediaType.PDF -> "application/pdf"
+        SecretMediaType.AUDIO -> "audio/mpeg"
+    }
+
+    private fun extensionForMime(mime: String, type: SecretMediaType): String {
+        val m = mime.lowercase()
+        return when {
+            m.contains("webm") -> "webm"
+            m.contains("matroska") -> "mkv"
+            m.contains("quicktime") -> "mov"
+            m.contains("mp4") && type == SecretMediaType.AUDIO -> "m4a"
+            m.contains("mpeg") && type == SecretMediaType.AUDIO -> "mp3"
+            m.contains("wav") -> "wav"
+            m.contains("ogg") -> "ogg"
+            m.contains("flac") -> "flac"
+            type == SecretMediaType.AUDIO -> "mp3"
+            type == SecretMediaType.PDF -> "pdf"
+            else -> "mp4"
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         focusTimerJob?.cancel()
+        downloadJob?.cancel()
+        speedTestJob?.cancel()
+        videoDownloadEngine.cancelActiveDownload()
+        secretVaultManager.wipeAllTempPreviews()
     }
 
     companion object {

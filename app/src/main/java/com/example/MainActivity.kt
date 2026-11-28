@@ -24,11 +24,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.browser.OfflinePageArchiver
+import com.example.crypto.SecretMediaVaultManager
 import com.example.data.local.LocalPreferencesStore
 import com.example.data.local.VeloDatabase
 import com.example.data.remote.VeloSyncRepository
 import com.example.data.remote.authStateFlow
 import com.example.data.remote.signOutGoogle
+import com.example.media.PdfEngine
+import com.example.media.SpeedTestEngine
+import com.example.media.VideoDownloadEngine
 import com.example.system.NetworkConnectivityObserver
 import com.example.system.VeloNotificationManager
 import com.example.ui.BrowserMainScreen
@@ -152,14 +156,22 @@ private fun BrowserWorkspaceRoot(
                 }
                 val localDb = VeloDatabase.getInstance(app)
                 BrowserViewModel(
+                    appContext = app.applicationContext,
                     syncRepository = syncRepository,
                     cachedPageDao = localDb.cachedPageDao(),
                     localShortcutDao = localDb.localShortcutDao(),
                     scratchpadClipDao = localDb.scratchpadClipDao(),
+                    downloadedMediaDao = localDb.downloadedMediaDao(),
+                    secretMediaDao = localDb.secretMediaDao(),
+                    speedTestHistoryDao = localDb.speedTestHistoryDao(),
                     localPrefs = LocalPreferencesStore(app),
                     offlineArchiver = OfflinePageArchiver(),
                     notificationManager = VeloNotificationManager(app),
                     connectivityObserver = NetworkConnectivityObserver(app),
+                    videoDownloadEngine = VideoDownloadEngine(app),
+                    pdfEngine = PdfEngine(app),
+                    speedTestEngine = SpeedTestEngine(app),
+                    secretVaultManager = SecretMediaVaultManager(app),
                     currentUserId = currentUserId
                 )
             }

@@ -3,6 +3,7 @@ package com.example.browser
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
@@ -28,7 +29,8 @@ data class TabWebCallbacks(
     val onTrackerBlocked: (tabId: String, host: String) -> Unit,
     val onInsecureHttpIntercepted: (tabId: String, originalHttpUrl: String) -> Unit,
     val onNetworkRequestLogged: (NetworkRequestLog) -> Unit,
-    val onFocusDistractionBlocked: (tabId: String, host: String) -> Unit
+    val onFocusDistractionBlocked: (tabId: String, host: String) -> Unit,
+    val onVideoDetected: (tabId: String, media: DetectedVideoMedia) -> Unit = { _, _ -> }
 )
 
 /**
@@ -88,8 +90,10 @@ class WebViewTabManager(
                 if (tab.isPrivate) {
                     domStorageEnabled = false
                     cacheMode = WebSettings.LOAD_NO_CACHE
-                    @Suppress("DEPRECATION")
-                    saveFormData = false
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                        @Suppress("DEPRECATION")
+                        saveFormData = false
+                    }
                 } else {
                     domStorageEnabled = true
                     cacheMode = WebSettings.LOAD_DEFAULT
@@ -158,6 +162,10 @@ class WebViewTabManager(
                         )
                         if (decision.blocked) {
                             callbacks.onTrackerBlocked(tab.id, reqHost)
+                        } else {
+                            detectVideoFromRequestUrl(reqUrl, tab.title)?.let { media ->
+                                callbacks.onVideoDetected(tab.id, media)
+                            }
                         }
                     }
 
@@ -184,6 +192,7 @@ class WebViewTabManager(
                             view.evaluateJavascript(AdBlockerEngine.COSMETIC_AD_CLEANUP_JS, null)
                         }
                         applyDarkPageStyle(view, darkWebPagesEnabled)
+                        scanPageForVideos(tab.id)
                     }
                     callbacks.onPageFinished(
                         tab.id,
@@ -394,6 +403,116 @@ class WebViewTabManager(
             path.endsWith(".woff") || path.endsWith(".woff2") || path.endsWith(".ttf") -> "FONT"
             path.contains("/api/") || path.endsWith(".json") -> "XHR"
             else -> "SUB"
+        }
+    }
+
+    // --- PLAYABLE VIDEO DETECTOR & WEBVIEW ACCESSOR ---
+
+    fun getWebView(tabId: String): WebView? = webViews[tabId]
+
+    fun scanPageForVideos(tabId: String) {
+        val wv = webViews[tabId] ?: return
+        val fallbackTitle = wv.title.orEmpty()
+        val js = """
+            (function() {
+                var results = [];
+                var seen = {};
+                function pushUrl(u, q, playing) {
+                    if (!u || seen[u]) return;
+                    if (u.indexOf('http://') !== 0 && u.indexOf('https://') !== 0) return;
+                    seen[u] = true;
+                    results.push({ url: u, quality: q || 'Auto', playing: !!playing });
+                }
+                var videos = document.querySelectorAll('video');
+                for (var i = 0; i < videos.length; i++) {
+                    var v = videos[i];
+                    var h = v.videoHeight || 0;
+                    var q = h >= 2160 ? '4K' : (h >= 1080 ? '1080p' : (h >= 720 ? '720p' : (h >= 480 ? '480p' : (h > 0 ? (h + 'p') : 'Auto'))));
+                    var playing = !v.paused && !v.ended && v.readyState > 1;
+                    if (v.currentSrc) pushUrl(v.currentSrc, q, playing);
+                    if (v.src) pushUrl(v.src, q, playing);
+                    var sources = v.querySelectorAll('source');
+                    for (var j = 0; j < sources.length; j++) {
+                        var s = sources[j];
+                        var label = s.getAttribute('label') || s.getAttribute('size') || q;
+                        if (s.src) pushUrl(s.src, label, playing);
+                    }
+                }
+                return JSON.stringify({ title: document.title || '', items: results.slice(0, 12) });
+            })();
+        """.trimIndent()
+        wv.evaluateJavascript(js) { rawResult ->
+            try {
+                val decoded = JSONTokenerUnwrap(rawResult)
+                if (decoded.isBlank()) return@evaluateJavascript
+                val obj = JSONObject(decoded)
+                val pageTitle = obj.optString("title", "").ifBlank { fallbackTitle }
+                val arr = obj.optJSONArray("items") ?: return@evaluateJavascript
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    val mediaUrl = item.optString("url", "")
+                    if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
+                        val quality = item.optString("quality", "Auto").ifBlank { "Auto" }
+                        val playing = item.optBoolean("playing", false)
+                        val format = detectFormatLabel(mediaUrl)
+                        callbacks.onVideoDetected(
+                            tabId,
+                            DetectedVideoMedia(
+                                url = mediaUrl,
+                                title = pageTitle.ifBlank { mediaUrl.toUri().host ?: "Web Video" },
+                                formatLabel = format,
+                                qualityLabel = quality,
+                                isPlaying = playing
+                            )
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun detectVideoFromRequestUrl(url: String, pageTitle: String): DetectedVideoMedia? {
+        if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
+            return null
+        }
+        val lower = url.lowercase()
+        val path = lower.substringBefore('?')
+        val isMedia = path.endsWith(".mp4") ||
+            path.endsWith(".webm") ||
+            path.endsWith(".m3u8") ||
+            path.endsWith(".mkv") ||
+            path.endsWith(".mov") ||
+            path.endsWith(".m4v") ||
+            lower.contains("mime=video") ||
+            lower.contains("/videoplayback")
+        if (!isMedia) return null
+        val quality = when {
+            lower.contains("2160") || lower.contains("4k") -> "4K"
+            lower.contains("1080") -> "1080p"
+            lower.contains("720") -> "720p"
+            lower.contains("480") -> "480p"
+            lower.contains("360") -> "360p"
+            else -> "HD"
+        }
+        return DetectedVideoMedia(
+            url = url,
+            title = pageTitle.ifBlank { url.toUri().host ?: "Detected Video" },
+            formatLabel = detectFormatLabel(url),
+            qualityLabel = quality,
+            isPlaying = true
+        )
+    }
+
+    private fun detectFormatLabel(url: String): String {
+        val path = url.substringBefore('?').lowercase()
+        return when {
+            path.endsWith(".m3u8") -> "HLS"
+            path.endsWith(".webm") -> "WEBM"
+            path.endsWith(".mkv") -> "MKV"
+            path.endsWith(".mov") -> "MOV"
+            path.endsWith(".m4v") -> "M4V"
+            else -> "MP4"
         }
     }
 

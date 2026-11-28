@@ -40,6 +40,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Key
@@ -98,8 +99,10 @@ import com.example.R
 import com.example.browser.ActiveOverlay
 import com.example.browser.BrowserTab
 import com.example.browser.FocusSessionState
+import com.example.browser.SecretMediaType
 import com.example.browser.SplitPane
 import com.example.browser.TabWebCallbacks
+import com.example.browser.VideoPlayerRequest
 import com.example.browser.WebViewTabManager
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ShieldEmerald
@@ -150,6 +153,22 @@ fun BrowserMainScreen(
     val scratchpadClips by viewModel.scratchpadClips.collectAsStateWithLifecycle()
     val findState by viewModel.findState.collectAsStateWithLifecycle()
 
+    val detectedVideos by viewModel.detectedVideosForActiveTab.collectAsStateWithLifecycle()
+    val downloadedMedia by viewModel.downloadedMedia.collectAsStateWithLifecycle()
+    val activeDownload by viewModel.activeDownload.collectAsStateWithLifecycle()
+    val videoPlayerRequest by viewModel.videoPlayerRequest.collectAsStateWithLifecycle()
+    val savedPdfs by viewModel.savedPdfs.collectAsStateWithLifecycle()
+    val activePdfDocument by viewModel.activePdfDocument.collectAsStateWithLifecycle()
+    val isPdfBusy by viewModel.isPdfBusy.collectAsStateWithLifecycle()
+    val speedTestState by viewModel.speedTestState.collectAsStateWithLifecycle()
+    val speedTestHistory by viewModel.speedTestHistory.collectAsStateWithLifecycle()
+    val secretVaultConfig by viewModel.secretVaultConfig.collectAsStateWithLifecycle()
+    val isSecretVaultUnlocked by viewModel.isSecretVaultUnlocked.collectAsStateWithLifecycle()
+    val secretVaultBusy by viewModel.secretVaultBusy.collectAsStateWithLifecycle()
+    val secretVaultError by viewModel.secretVaultError.collectAsStateWithLifecycle()
+    val secretMediaItems by viewModel.secretMediaItems.collectAsStateWithLifecycle()
+    val secretImagePreview by viewModel.secretImagePreview.collectAsStateWithLifecycle()
+
     val isSignedIn = viewModel.currentUserId != null
     val unlockedFingerprint = (vaultGateState as? VaultGateState.Unlocked)?.keyFingerprint.orEmpty()
     val isVaultUnlocked = vaultGateState is VaultGateState.Unlocked
@@ -171,6 +190,9 @@ fun BrowserMainScreen(
                 onNetworkRequestLogged = { log -> viewModel.recordNetworkLog(log) },
                 onFocusDistractionBlocked = { tabId, host ->
                     viewModel.recordFocusDistractionBlocked(tabId, host)
+                },
+                onVideoDetected = { tabId, media ->
+                    viewModel.recordDetectedVideo(tabId, media)
                 }
             )
         )
@@ -370,7 +392,20 @@ fun BrowserMainScreen(
                                                 imeAction = ImeAction.Go
                                             ),
                                             keyboardActions = KeyboardActions(
-                                                onGo = { navigateCurrentTab(addressText) }
+                                                onGo = {
+                                                    val submitted = addressText
+                                                    viewModel.handleOmniboxInput(
+                                                        rawInput = submitted,
+                                                        onSecretVaultTriggered = {
+                                                            addressText = activeTab.url
+                                                            focusManager.clearFocus()
+                                                            isEditingAddress = false
+                                                        },
+                                                        onProceedToWebNavigation = {
+                                                            navigateCurrentTab(submitted)
+                                                        }
+                                                    )
+                                                }
                                             ),
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -959,6 +994,65 @@ fun BrowserMainScreen(
                     }
                 }
 
+                // Floating "Download Video" Pill Button when playable video is detected on the active tab
+                if (!isInPipMode) {
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = detectedVideos.isNotEmpty() || activeDownload != null,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 16.dp, bottom = if (statusBanner != null) 62.dp else 16.dp)
+                    ) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            shape = RoundedCornerShape(24.dp),
+                            shadowElevation = 6.dp,
+                            modifier = Modifier
+                                .height(48.dp)
+                                .clickable {
+                                    webViewManager.scanPageForVideos(activeTab.id)
+                                    viewModel.setOverlay(ActiveOverlay.VIDEO_DOWNLOADER)
+                                }
+                                .testTag("floating_download_video_button")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (activeDownload != null) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                    val pct = ((activeDownload?.fraction ?: -1f) * 100f).toInt()
+                                    Text(
+                                        text = if (pct >= 0) "Downloading $pct%" else "Downloading...",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Download,
+                                        contentDescription = "Download playing video",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = if (detectedVideos.size > 1) {
+                                            "Download Video (${detectedVideos.size})"
+                                        } else {
+                                            "Download Video"
+                                        },
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Transient Toast / Status Pill
                 if (!isInPipMode) {
                     androidx.compose.animation.AnimatedVisibility(
@@ -1164,6 +1258,10 @@ fun BrowserMainScreen(
                     networkBlockedCount = networkLogs.count { it.wasBlocked },
                     clipsCount = scratchpadClips.size,
                     offlineCount = readingList.count { it.isCachedLocally },
+                    detectedVideosCount = detectedVideos.size,
+                    downloadedVideosCount = downloadedMedia.size,
+                    savedPdfsCount = savedPdfs.size,
+                    isSecretVaultConfigured = secretVaultConfig != null,
                     onToggleSplitView = { viewModel.toggleSplitView() },
                     onOpenReaderMode = {
                         webViewManager.extractReadableArticle(
@@ -1182,6 +1280,34 @@ fun BrowserMainScreen(
                     onOpenOfflineReading = { viewModel.setOverlay(ActiveOverlay.OFFLINE_READING) },
                     onOpenVault = { viewModel.setOverlay(ActiveOverlay.PASSWORD_VAULT) },
                     onOpenNewPrivateTab = { viewModel.createNewTab(isPrivate = true) },
+                    onOpenVideoDownloader = {
+                        webViewManager.scanPageForVideos(activeTab.id)
+                        viewModel.setOverlay(ActiveOverlay.VIDEO_DOWNLOADER)
+                    },
+                    onOpenVideoPlayer = {
+                        val firstDetected = detectedVideos.firstOrNull()
+                        if (firstDetected != null) {
+                            viewModel.openVideoPlayer(
+                                VideoPlayerRequest(
+                                    title = firstDetected.title,
+                                    primarySource = firstDetected.url,
+                                    isLocalFile = false,
+                                    qualityVariants = detectedVideos.map { "${it.formatLabel} • ${it.qualityLabel}" to it.url }
+                                )
+                            )
+                        } else {
+                            viewModel.setOverlay(ActiveOverlay.VIDEO_PLAYER)
+                        }
+                    },
+                    onOpenPdfTools = {
+                        viewModel.refreshSavedPdfs()
+                        viewModel.setOverlay(ActiveOverlay.PDF_TOOLS)
+                    },
+                    onOpenSpeedTest = { viewModel.setOverlay(ActiveOverlay.SPEED_TEST) },
+                    onOpenSecretVaultSetup = {
+                        viewModel.clearSecretVaultError()
+                        viewModel.setOverlay(ActiveOverlay.SECRET_VAULT_SETUP)
+                    },
                     onDismiss = { viewModel.setOverlay(ActiveOverlay.NONE) }
                 )
 
@@ -1404,6 +1530,164 @@ fun BrowserMainScreen(
                     },
                     onDismiss = { viewModel.setOverlay(ActiveOverlay.NONE) }
                 )
+
+                ActiveOverlay.VIDEO_DOWNLOADER -> VideoDownloaderSheet(
+                    detectedVideos = detectedVideos,
+                    downloadedVideos = downloadedMedia,
+                    activeDownload = activeDownload,
+                    onRescanPage = {
+                        webViewManager.scanPageForVideos(activeTab.id)
+                        viewModel.showTransientBanner("Scanned current webpage for playable video streams.")
+                    },
+                    onDownloadVideo = { url, title, quality ->
+                        viewModel.startVideoDownload(url, title, quality)
+                    },
+                    onCancelDownload = { viewModel.cancelVideoDownload() },
+                    onPlayStream = { media ->
+                        viewModel.openVideoPlayer(
+                            request = VideoPlayerRequest(
+                                title = media.title,
+                                primarySource = media.url,
+                                isLocalFile = false,
+                                qualityVariants = detectedVideos.map { "${it.formatLabel} • ${it.qualityLabel}" to it.url }
+                            ),
+                            returnTo = ActiveOverlay.VIDEO_DOWNLOADER
+                        )
+                    },
+                    onPlayDownloaded = { item ->
+                        viewModel.openVideoPlayer(
+                            request = VideoPlayerRequest(
+                                title = item.title,
+                                primarySource = item.localPath,
+                                isLocalFile = true
+                            ),
+                            returnTo = ActiveOverlay.VIDEO_DOWNLOADER
+                        )
+                    },
+                    onHideDownloadedInVault = { item ->
+                        viewModel.hideLocalFileInSecretVault(
+                            filePath = item.localPath,
+                            displayName = item.title,
+                            type = SecretMediaType.VIDEO,
+                            mimeType = item.mimeType,
+                            onOriginalHidden = { viewModel.deleteDownloadedMedia(item) }
+                        )
+                    },
+                    onDeleteDownloaded = { viewModel.deleteDownloadedMedia(it) },
+                    onDismiss = { viewModel.setOverlay(ActiveOverlay.NONE) }
+                )
+
+                ActiveOverlay.VIDEO_PLAYER -> VideoPlayerSheet(
+                    request = videoPlayerRequest,
+                    onSelectLocalUri = { uri, isAudio ->
+                        viewModel.openVideoPlayer(
+                            VideoPlayerRequest(
+                                title = if (isAudio) "Local Audio" else "Local Video",
+                                primarySource = uri.toString(),
+                                isLocalFile = true,
+                                isAudioOnly = isAudio
+                            )
+                        )
+                    },
+                    onOpenStreamUrl = { url ->
+                        viewModel.openVideoPlayer(
+                            VideoPlayerRequest(
+                                title = "Network Video Stream",
+                                primarySource = url,
+                                isLocalFile = false
+                            )
+                        )
+                    },
+                    onEnterPipMode = onEnterPipMode,
+                    onDismiss = { viewModel.closeVideoPlayer() }
+                )
+
+                ActiveOverlay.PDF_TOOLS -> PdfToolsSheet(
+                    pdfEngine = viewModel.pdfEngine,
+                    savedPdfs = savedPdfs,
+                    activePdf = activePdfDocument,
+                    isBusy = isPdfBusy,
+                    hasActiveWebPage = activeTab.url.startsWith("http"),
+                    activePageTitle = activeTab.title,
+                    onImportPdfUri = { viewModel.importPdfFromUri(it) },
+                    onConvertImagesToPdf = { uris, title -> viewModel.convertImagesToPdf(uris, title) },
+                    onConvertTextToPdf = { title, body -> viewModel.convertTextToPdf(title, body) },
+                    onConvertWebPageToPdf = {
+                        viewModel.convertActiveWebViewToPdf(
+                            webView = webViewManager.getWebView(activeTab.id),
+                            title = activeTab.title
+                        )
+                    },
+                    onOpenPdf = { viewModel.openPdfDocument(it) },
+                    onCloseActivePdf = { viewModel.closeActivePdfDocument() },
+                    onExtractPdfToImages = { viewModel.extractPdfToPngImages(it) },
+                    onExportPdfToUri = { doc, uri -> viewModel.exportPdfToUri(doc, uri) },
+                    onHidePdfInVault = { doc ->
+                        viewModel.hideLocalFileInSecretVault(
+                            filePath = doc.filePath,
+                            displayName = "${doc.title}.pdf",
+                            type = SecretMediaType.PDF,
+                            mimeType = "application/pdf",
+                            onOriginalHidden = { viewModel.deletePdfDocument(doc) }
+                        )
+                    },
+                    onDeletePdf = { viewModel.deletePdfDocument(it) },
+                    onDismiss = {
+                        viewModel.closeActivePdfDocument()
+                        viewModel.setOverlay(ActiveOverlay.NONE)
+                    }
+                )
+
+                ActiveOverlay.SPEED_TEST -> SpeedTestSheet(
+                    liveState = speedTestState,
+                    history = speedTestHistory,
+                    onStartTest = { viewModel.startSpeedTest() },
+                    onStopTest = { viewModel.stopSpeedTest() },
+                    onClearHistory = { viewModel.clearSpeedTestHistory() },
+                    onDismiss = {
+                        viewModel.stopSpeedTest()
+                        viewModel.setOverlay(ActiveOverlay.NONE)
+                    }
+                )
+
+                ActiveOverlay.SECRET_VAULT_SETUP -> SecretVaultSetupSheet(
+                    isAlreadyConfigured = secretVaultConfig != null,
+                    isCurrentlyUnlocked = isSecretVaultUnlocked,
+                    isBusy = secretVaultBusy,
+                    errorMessage = secretVaultError,
+                    onSaveCode = { newCode, confirm, current ->
+                        viewModel.setupOrChangeSecretCode(newCode, confirm, current)
+                    },
+                    onClearError = { viewModel.clearSecretVaultError() },
+                    onDismiss = {
+                        viewModel.clearSecretVaultError()
+                        viewModel.setOverlay(
+                            if (isSecretVaultUnlocked) ActiveOverlay.SECRET_MEDIA_VAULT else ActiveOverlay.NONE
+                        )
+                    }
+                )
+
+                ActiveOverlay.SECRET_MEDIA_VAULT -> {
+                    if (isSecretVaultUnlocked) {
+                        SecretMediaVaultSheet(
+                            items = secretMediaItems,
+                            imagePreview = secretImagePreview,
+                            isBusy = secretVaultBusy,
+                            onHideUris = { uris, type -> viewModel.hideUrisInSecretVault(uris, type) },
+                            onOpenItem = { viewModel.openSecretMediaItem(it) },
+                            onCloseImagePreview = { viewModel.closeSecretImagePreview() },
+                            onExportItem = { item, uri -> viewModel.exportSecretMediaItem(item, uri) },
+                            onDeleteItem = { viewModel.deleteSecretMediaItem(it) },
+                            onOpenChangeCode = {
+                                viewModel.clearSecretVaultError()
+                                viewModel.setOverlay(ActiveOverlay.SECRET_VAULT_SETUP)
+                            },
+                            onLockAndClose = { viewModel.lockSecretMediaVault() }
+                        )
+                    } else {
+                        viewModel.setOverlay(ActiveOverlay.NONE)
+                    }
+                }
             }
         }
     }

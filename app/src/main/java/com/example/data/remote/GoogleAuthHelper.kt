@@ -46,7 +46,9 @@ private fun resolveDefaultWebClientId(context: Context): String? {
     val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
     if (resId == 0) return null
     return try {
-        context.getString(resId).takeIf { it.isNotBlank() }
+        context.getString(resId)
+            .trim()
+            .takeIf { it.isNotEmpty() && !it.startsWith("YOUR_", ignoreCase = true) }
     } catch (_: Exception) {
         null
     }

@@ -451,7 +451,7 @@ private fun OfflineArticleReaderScreen(
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Text(
-                    text = "OFFLINE ENCRYPTED CACHE • ZERO NETWORK",
+                    text = "OFFLINE LOCAL CACHE • ZERO NETWORK",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)

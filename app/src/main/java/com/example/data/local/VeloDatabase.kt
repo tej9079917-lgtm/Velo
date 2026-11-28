@@ -9,29 +9,36 @@ import androidx.room.RoomDatabase
     entities = [
         CachedPageEntity::class,
         LocalShortcutEntity::class,
-        ScratchpadClipEntity::class
+        ScratchpadClipEntity::class,
+        DownloadedMediaEntity::class,
+        SecretMediaEntity::class,
+        SpeedTestHistoryEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class VeloDatabase : RoomDatabase() {
     abstract fun cachedPageDao(): CachedPageDao
     abstract fun localShortcutDao(): LocalShortcutDao
     abstract fun scratchpadClipDao(): ScratchpadClipDao
+    abstract fun downloadedMediaDao(): DownloadedMediaDao
+    abstract fun secretMediaDao(): SecretMediaDao
+    abstract fun speedTestHistoryDao(): SpeedTestHistoryDao
 
     companion object {
         @Volatile
-        private var instance: VeloDatabase? = null
+        private var INSTANCE: VeloDatabase? = null
 
         fun getInstance(context: Context): VeloDatabase {
-            return instance ?: synchronized(this) {
-                instance ?: Room.databaseBuilder(
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     VeloDatabase::class.java,
-                    "velo_offline_cache.db"
-                ).fallbackToDestructiveMigration(dropAllTables = true)
+                    "velo_browser_local.db"
+                )
+                    .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
-                    .also { instance = it }
+                    .also { INSTANCE = it }
             }
         }
     }

@@ -26,11 +26,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.EnhancedEncryption
 import androidx.compose.material.icons.filled.FindInPage
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.OfflinePin
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Splitscreen
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -61,6 +66,10 @@ fun PowerToolsSheet(
     networkBlockedCount: Int,
     clipsCount: Int,
     offlineCount: Int,
+    detectedVideosCount: Int,
+    downloadedVideosCount: Int,
+    savedPdfsCount: Int,
+    isSecretVaultConfigured: Boolean,
     onToggleSplitView: () -> Unit,
     onOpenReaderMode: () -> Unit,
     onOpenScratchpad: () -> Unit,
@@ -71,6 +80,11 @@ fun PowerToolsSheet(
     onOpenOfflineReading: () -> Unit,
     onOpenVault: () -> Unit,
     onOpenNewPrivateTab: () -> Unit,
+    onOpenVideoDownloader: () -> Unit,
+    onOpenVideoPlayer: () -> Unit,
+    onOpenPdfTools: () -> Unit,
+    onOpenSpeedTest: () -> Unit,
+    onOpenSecretVaultSetup: () -> Unit,
     onDismiss: () -> Unit
 ) {
     BackHandler(onBack = onDismiss)
@@ -116,6 +130,70 @@ fun PowerToolsSheet(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.weight(1f)
         ) {
+            item {
+                PowerToolCard(
+                    icon = Icons.Default.Download,
+                    title = "Video Downloader",
+                    subtitle = if (detectedVideosCount > 0) "$detectedVideosCount playing stream(s) ready" else "Save playing web videos offline",
+                    badge = when {
+                        detectedVideosCount > 0 -> "$detectedVideosCount LIVE"
+                        downloadedVideosCount > 0 -> "$downloadedVideosCount"
+                        else -> null
+                    },
+                    accent = ShieldEmerald,
+                    enabled = true,
+                    onClick = onOpenVideoDownloader,
+                    tag = "tool_video_downloader"
+                )
+            }
+            item {
+                PowerToolCard(
+                    icon = Icons.Default.PlayCircle,
+                    title = "Video Player",
+                    subtitle = "All formats, speed, quality & audio",
+                    badge = "PRO",
+                    accent = MaterialTheme.colorScheme.primary,
+                    enabled = true,
+                    onClick = onOpenVideoPlayer,
+                    tag = "tool_video_player"
+                )
+            }
+            item {
+                PowerToolCard(
+                    icon = Icons.Default.PictureAsPdf,
+                    title = "PDF Viewer & Conv.",
+                    subtitle = "Read PDF, Webpage/Img/Text to PDF",
+                    badge = if (savedPdfsCount > 0) "$savedPdfsCount" else "PDF",
+                    accent = MaterialTheme.colorScheme.error,
+                    enabled = true,
+                    onClick = onOpenPdfTools,
+                    tag = "tool_pdf_tools"
+                )
+            }
+            item {
+                PowerToolCard(
+                    icon = Icons.Default.Speed,
+                    title = "Speed Test Meter",
+                    subtitle = "Live ping, jitter, down & up Mbps",
+                    badge = "LIVE",
+                    accent = WarningAmber,
+                    enabled = true,
+                    onClick = onOpenSpeedTest,
+                    tag = "tool_speed_test"
+                )
+            }
+            item {
+                PowerToolCard(
+                    icon = Icons.Default.EnhancedEncryption,
+                    title = "Secret Media Vault",
+                    subtitle = if (isSecretVaultConfigured) "Type your secret code in search bar" else "Setup code to hide media files",
+                    badge = if (isSecretVaultConfigured) "CODE SET" else "SETUP",
+                    accent = MaterialTheme.colorScheme.tertiary,
+                    enabled = true,
+                    onClick = onOpenSecretVaultSetup,
+                    tag = "tool_secret_vault_setup"
+                )
+            }
             item {
                 PowerToolCard(
                     icon = Icons.Default.Splitscreen,
