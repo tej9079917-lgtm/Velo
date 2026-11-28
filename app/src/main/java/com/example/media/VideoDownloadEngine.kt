@@ -2,6 +2,12 @@ package com.example.media
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -10,6 +16,7 @@ import android.util.Base64
 import android.webkit.CookieManager
 import android.webkit.URLUtil
 import androidx.core.net.toUri
+import com.example.browser.ImageDownloadFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -181,6 +188,165 @@ class VideoDownloadEngine(private val context: Context) {
             )
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    /**
+     * Downloads any webpage image (HTTP/HTTPS or inline data:image/) in FULL SIZE
+     * and converts/exports it to the user's selected format (Original, PNG, JPEG, WEBP, or PDF).
+     */
+    suspend fun downloadImageInFormat(
+        rawUrl: String,
+        title: String,
+        targetFormat: ImageDownloadFormat,
+        referer: String? = null,
+        userAgent: String? = null
+    ): Result<DownloadedVideoResult> = withContext(Dispatchers.IO) {
+        val cleanUrl = rawUrl.trim()
+        val id = "img_${UUID.randomUUID().toString().take(10)}"
+        val friendlyTitle = title.trim().ifBlank { deriveTitleFromUrl(cleanUrl) }
+
+        val rawBytes: ByteArray
+        val sourceMime: String
+        try {
+            if (cleanUrl.startsWith("data:", ignoreCase = true)) {
+                val header = cleanUrl.substringAfter("data:").substringBefore(",", "")
+                sourceMime = header.substringBefore(";").ifBlank { "image/png" }
+                val payload = cleanUrl.substringAfter(",", "")
+                rawBytes = Base64.decode(payload, Base64.DEFAULT)
+            } else {
+                val req = buildAuthenticatedRequest(cleanUrl, referer, userAgent)
+                val call = httpClient.newCall(req)
+                activeCallRef.set(call)
+                val fetched = call.execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        return@withContext Result.failure(IllegalStateException("Image download failed (HTTP ${resp.code})."))
+                    }
+                    val ct = resp.header("Content-Type").orEmpty().substringBefore(';').trim()
+                    val bytes = resp.body?.bytes()
+                        ?: return@withContext Result.failure(IllegalStateException("Empty image response."))
+                    if (bytes.size > MAX_INLINE_BYTES * 2) {
+                        return@withContext Result.failure(IllegalStateException("Image exceeds 60 MB limit."))
+                    }
+                    bytes to ct
+                }
+                rawBytes = fetched.first
+                sourceMime = fetched.second
+            }
+            if (rawBytes.isEmpty()) {
+                return@withContext Result.failure(IllegalStateException("Downloaded image was empty."))
+            }
+
+            if (targetFormat == ImageDownloadFormat.ORIGINAL) {
+                val (fmtLabel, resolvedMime, ext) = inferFormatAndMime(cleanUrl, sourceMime)
+                val safeFile = createConfinedFile("$id.$ext")
+                FileOutputStream(safeFile).use { out ->
+                    out.write(rawBytes)
+                    out.flush()
+                }
+                val pubName = sanitizePublicFileName("$friendlyTitle.$ext")
+                val mirrored = mirrorToPublicDownloads(safeFile, pubName, resolvedMime)
+                return@withContext Result.success(
+                    DownloadedVideoResult(
+                        id = id,
+                        title = friendlyTitle,
+                        sourceUrl = cleanUrl,
+                        localPath = safeFile.canonicalPath,
+                        mimeType = resolvedMime,
+                        formatLabel = fmtLabel,
+                        qualityLabel = "Full Size",
+                        byteSize = rawBytes.size.toLong(),
+                        savedToPublicDownloads = mirrored
+                    )
+                )
+            }
+
+            // Decode full-size image (inScaled = false; sample only if > 4096px to prevent OOM)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return@withContext Result.failure(IllegalStateException("Unsupported image format for conversion."))
+            }
+            var sampleSize = 1
+            while (bounds.outWidth / sampleSize > 4096 || bounds.outHeight / sampleSize > 4096) {
+                sampleSize *= 2
+            }
+            val decodeOpts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inScaled = false
+            }
+            val bitmap = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts)
+                ?: return@withContext Result.failure(IllegalStateException("Could not decode image."))
+
+            val resolutionTag = "${bitmap.width}×${bitmap.height}"
+            val safeFile = createConfinedFile("$id.${targetFormat.ext}")
+            try {
+                if (targetFormat == ImageDownloadFormat.PDF) {
+                    val pdfDoc = PdfDocument()
+                    try {
+                        val pageW = bitmap.width.coerceIn(595, 2400)
+                        val pageH = (bitmap.height.toFloat() * (pageW.toFloat() / bitmap.width.toFloat()))
+                            .toInt()
+                            .coerceIn(400, 3200)
+                        val pageInfo = PdfDocument.PageInfo.Builder(pageW, pageH, 1).create()
+                        val page = pdfDoc.startPage(pageInfo)
+                        page.canvas.drawColor(Color.WHITE)
+                        page.canvas.drawBitmap(
+                            bitmap,
+                            null,
+                            RectF(0f, 0f, pageW.toFloat(), pageH.toFloat()),
+                            Paint(Paint.FILTER_BITMAP_FLAG)
+                        )
+                        pdfDoc.finishPage(page)
+                        FileOutputStream(safeFile).use { out ->
+                            pdfDoc.writeTo(out)
+                            out.flush()
+                        }
+                    } finally {
+                        pdfDoc.close()
+                    }
+                } else {
+                    val compressFormat = when (targetFormat) {
+                        ImageDownloadFormat.PNG -> Bitmap.CompressFormat.PNG
+                        ImageDownloadFormat.JPEG -> Bitmap.CompressFormat.JPEG
+                        ImageDownloadFormat.WEBP -> {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                Bitmap.CompressFormat.WEBP_LOSSLESS
+                            } else {
+                                @Suppress("DEPRECATION")
+                                Bitmap.CompressFormat.WEBP
+                            }
+                        }
+                        else -> Bitmap.CompressFormat.PNG
+                    }
+                    FileOutputStream(safeFile).use { out ->
+                        bitmap.compress(compressFormat, 100, out)
+                        out.flush()
+                    }
+                }
+            } finally {
+                bitmap.recycle()
+            }
+
+            val pubName = sanitizePublicFileName("$friendlyTitle.${targetFormat.ext}")
+            val mirrored = mirrorToPublicDownloads(safeFile, pubName, targetFormat.mimeType)
+            Result.success(
+                DownloadedVideoResult(
+                    id = id,
+                    title = friendlyTitle,
+                    sourceUrl = cleanUrl,
+                    localPath = safeFile.canonicalPath,
+                    mimeType = targetFormat.mimeType,
+                    formatLabel = targetFormat.label,
+                    qualityLabel = "Full $resolutionTag",
+                    byteSize = safeFile.length(),
+                    savedToPublicDownloads = mirrored
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            activeCallRef.set(null)
         }
     }
 
@@ -473,6 +639,25 @@ class VideoDownloadEngine(private val context: Context) {
             }
         } catch (_: Exception) {
             false
+        }
+    }
+
+    /**
+     * Removes Velo's own mirrored copy from public Downloads/Velo (API 29+) when a user hides
+     * a downloaded item inside the Secret Vault, so it no longer appears in Files or Gallery.
+     */
+    fun deletePublicDownloadsCopy(displayTitle: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val safePrefix = displayTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(60)
+        if (safePrefix.isBlank()) return
+        try {
+            val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            context.contentResolver.delete(
+                collection,
+                "${MediaStore.Downloads.DISPLAY_NAME} LIKE ? AND ${MediaStore.Downloads.RELATIVE_PATH} LIKE ?",
+                arrayOf("$safePrefix%", "%Downloads/Velo%")
+            )
+        } catch (_: Exception) {
         }
     }
 

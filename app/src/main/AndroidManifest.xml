@@ -53,7 +53,7 @@
                 <data android:scheme="https" />
                 <data android:mimeType="application/pdf" />
             </intent-filter>
-            <!-- Open Video files directly in Velo Player -->
+            <!-- Open MP4 and Video files directly in Velo Player -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -62,14 +62,19 @@
                 <data android:scheme="file" />
                 <data android:scheme="http" />
                 <data android:scheme="https" />
+                <data android:mimeType="video/mp4" />
                 <data android:mimeType="video/*" />
             </intent-filter>
-            <!-- Open Image files directly in Velo Image Viewer -->
+            <!-- Open JPEG and Image files directly in Velo Image Viewer -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
+                <data android:mimeType="image/jpeg" />
+                <data android:mimeType="image/png" />
+                <data android:mimeType="image/webp" />
                 <data android:mimeType="image/*" />
             </intent-filter>
             <!-- Open Audio files directly in Velo Media Player -->
@@ -81,6 +86,16 @@
                 <data android:mimeType="audio/*" />
             </intent-filter>
         </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <service
             android:name=".system.MediaPlaybackForegroundService"

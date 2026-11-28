@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Shareable downloaded media & files (NEVER expose secret_vault or vault_preview) -->
+    <files-path
+        name="velo_downloads"
+        path="velo_downloads/" />
+    <files-path
+        name="velo_pdfs"
+        path="velo_pdfs/" />
+    <files-path
+        name="velo_pdf_images"
+        path="velo_pdf_images/" />
+    <external-files-path
+        name="velo_ext_downloads"
+        path="Download/" />
+    <cache-path
+        name="velo_shared_exports"
+        path="shared_exports/" />
+</paths>

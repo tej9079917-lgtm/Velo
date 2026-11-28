@@ -35,6 +35,7 @@ data class TabWebCallbacks(
     val onNetworkRequestLogged: (NetworkRequestLog) -> Unit,
     val onFocusDistractionBlocked: (tabId: String, host: String) -> Unit,
     val onVideoDetected: (tabId: String, media: DetectedVideoMedia) -> Unit = { _, _ -> },
+    val onImagesDetected: (tabId: String, images: List<DetectedImageMedia>) -> Unit = { _, _ -> },
     val onDownloadRequested: (
         tabId: String,
         url: String,
@@ -334,6 +335,7 @@ class WebViewTabManager(
                         }
                         applyDarkPageStyle(view, darkWebPagesEnabled)
                         scanPageForVideos(tab.id)
+                        scanPageForImages(tab.id)
                     }
                     callbacks.onPageFinished(
                         tab.id,
@@ -573,22 +575,49 @@ class WebViewTabManager(
                     seen[u] = true;
                     results.push({ url: u, quality: q || 'Auto', playing: !!playing });
                 }
-                var videos = document.querySelectorAll('video');
-                for (var i = 0; i < videos.length; i++) {
-                    var v = videos[i];
-                    var h = v.videoHeight || 0;
-                    var q = h >= 2160 ? '4K' : (h >= 1080 ? '1080p' : (h >= 720 ? '720p' : (h >= 480 ? '480p' : (h > 0 ? (h + 'p') : 'Auto'))));
-                    var playing = !v.paused && !v.ended && v.readyState > 1;
-                    if (v.currentSrc) pushUrl(v.currentSrc, q, playing);
-                    if (v.src) pushUrl(v.src, q, playing);
-                    var sources = v.querySelectorAll('source');
-                    for (var j = 0; j < sources.length; j++) {
-                        var s = sources[j];
-                        var label = s.getAttribute('label') || s.getAttribute('size') || q;
-                        if (s.src) pushUrl(s.src, label, playing);
+                function scanDoc(doc) {
+                    if (!doc) return;
+                    var videos = doc.querySelectorAll('video');
+                    for (var i = 0; i < videos.length; i++) {
+                        var v = videos[i];
+                        var h = v.videoHeight || 0;
+                        var q = h >= 2160 ? '4K' : (h >= 1080 ? '1080p' : (h >= 720 ? '720p' : (h >= 480 ? '480p' : (h > 0 ? (h + 'p') : 'Auto'))));
+                        var playing = !v.paused && !v.ended && v.readyState > 1;
+                        if (v.currentSrc) pushUrl(v.currentSrc, q, playing);
+                        if (v.src) pushUrl(v.src, q, playing);
+                        var sources = v.querySelectorAll('source');
+                        for (var j = 0; j < sources.length; j++) {
+                            var s = sources[j];
+                            var label = s.getAttribute('label') || s.getAttribute('size') || q;
+                            if (s.src) pushUrl(s.src, label, playing);
+                        }
+                    }
+                    var metas = doc.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"], meta[name="twitter:player:stream"]');
+                    for (var m = 0; m < metas.length; m++) {
+                        var c = metas[m].getAttribute('content');
+                        if (c) pushUrl(c, 'HD', false);
                     }
                 }
-                return JSON.stringify({ title: document.title || '', items: results.slice(0, 12) });
+                scanDoc(document);
+                try {
+                    var frames = document.querySelectorAll('iframe');
+                    for (var f = 0; f < frames.length; f++) {
+                        try { scanDoc(frames[f].contentDocument); } catch (e) {}
+                    }
+                } catch (e) {}
+                try {
+                    if (window.performance && performance.getEntriesByType) {
+                        var entries = performance.getEntriesByType('resource') || [];
+                        for (var k = 0; k < entries.length; k++) {
+                            var name = (entries[k] && entries[k].name) ? String(entries[k].name) : '';
+                            var low = name.toLowerCase().split('?')[0];
+                            if (low.endsWith('.mp4') || low.endsWith('.m3u8') || low.endsWith('.webm') || low.endsWith('.mkv') || low.endsWith('.mov') || name.toLowerCase().indexOf('mime=video') !== -1) {
+                                pushUrl(name, 'Stream', true);
+                            }
+                        }
+                    }
+                } catch (e) {}
+                return JSON.stringify({ title: document.title || '', items: results.slice(0, 20) });
             })();
         """.trimIndent()
         wv.evaluateJavascript(js) { rawResult ->
@@ -619,6 +648,132 @@ class WebViewTabManager(
                 }
             } catch (_: Exception) {
             }
+        }
+    }
+
+    fun scanPageForImages(tabId: String) {
+        val wv = webViews[tabId] ?: return
+        val fallbackTitle = wv.title.orEmpty()
+        val js = """
+            (function() {
+                var results = [];
+                var seen = {};
+                function resolveUrl(u) {
+                    if (!u) return '';
+                    u = u.trim();
+                    if (u.indexOf('data:image/') === 0) return u;
+                    try { return new URL(u, document.baseURI).href; } catch (e) { return u; }
+                }
+                function bestFromSrcset(srcset) {
+                    if (!srcset) return '';
+                    var parts = srcset.split(',');
+                    var bestUrl = '';
+                    var bestScore = -1;
+                    for (var i = 0; i < parts.length; i++) {
+                        var seg = parts[i].trim().split(/\s+/);
+                        if (!seg[0]) continue;
+                        var score = 1;
+                        if (seg[1]) {
+                            var num = parseFloat(seg[1]);
+                            if (!isNaN(num)) score = seg[1].indexOf('x') !== -1 ? num * 1000 : num;
+                        }
+                        if (score >= bestScore) {
+                            bestScore = score;
+                            bestUrl = seg[0];
+                        }
+                    }
+                    return bestUrl;
+                }
+                function pushImg(rawUrl, alt, w, h) {
+                    var abs = resolveUrl(rawUrl);
+                    if (!abs || seen[abs]) return;
+                    if (abs.indexOf('http://') !== 0 && abs.indexOf('https://') !== 0 && abs.indexOf('data:image/') !== 0) return;
+                    if (abs.indexOf('data:image/') === 0 && abs.length < 400) return;
+                    seen[abs] = true;
+                    results.push({ url: abs, alt: (alt || '').trim().slice(0, 60), w: w || 0, h: h || 0 });
+                }
+                var ogImg = document.querySelector('meta[property="og:image"], meta[name="twitter:image"]');
+                if (ogImg && ogImg.content) pushImg(ogImg.content, document.title || 'Featured Image', 0, 0);
+
+                var imgs = document.querySelectorAll('img');
+                for (var i = 0; i < imgs.length && results.length < 40; i++) {
+                    var img = imgs[i];
+                    var w = img.naturalWidth || img.width || 0;
+                    var h = img.naturalHeight || img.height || 0;
+                    if ((w > 0 && w < 48) || (h > 0 && h < 48)) continue;
+                    var fullCandidate = img.getAttribute('data-original') ||
+                        img.getAttribute('data-full-url') ||
+                        img.getAttribute('data-large-file') ||
+                        img.getAttribute('data-hires') ||
+                        bestFromSrcset(img.getAttribute('srcset')) ||
+                        img.getAttribute('data-src') ||
+                        img.currentSrc ||
+                        img.src;
+                    var parentLink = img.closest ? img.closest('a[href]') : null;
+                    if (parentLink && parentLink.href) {
+                        var hrefLow = parentLink.href.toLowerCase().split('?')[0];
+                        if (hrefLow.endsWith('.jpg') || hrefLow.endsWith('.jpeg') || hrefLow.endsWith('.png') || hrefLow.endsWith('.webp')) {
+                            fullCandidate = parentLink.href;
+                        }
+                    }
+                    pushImg(fullCandidate, img.alt || img.title || '', w, h);
+                }
+
+                var sources = document.querySelectorAll('picture source[srcset]');
+                for (var s = 0; s < sources.length && results.length < 45; s++) {
+                    var best = bestFromSrcset(sources[s].getAttribute('srcset'));
+                    if (best) pushImg(best, document.title || 'Web Image', 0, 0);
+                }
+
+                return JSON.stringify({ title: document.title || '', items: results.slice(0, 40) });
+            })();
+        """.trimIndent()
+        wv.evaluateJavascript(js) { rawResult ->
+            try {
+                val decoded = JSONTokenerUnwrap(rawResult)
+                if (decoded.isBlank()) return@evaluateJavascript
+                val obj = JSONObject(decoded)
+                val pageTitle = obj.optString("title", "").ifBlank { fallbackTitle }
+                val arr = obj.optJSONArray("items") ?: return@evaluateJavascript
+                val detected = mutableListOf<DetectedImageMedia>()
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    val imgUrl = item.optString("url", "")
+                    if (imgUrl.isBlank()) continue
+                    val alt = item.optString("alt", "").ifBlank {
+                        if (imgUrl.startsWith("data:")) "Inline Image ${i + 1}"
+                        else imgUrl.toUri().lastPathSegment?.substringBeforeLast('.')?.take(36)
+                            ?.ifBlank { pageTitle.ifBlank { "Image ${i + 1}" } }
+                            ?: "Image ${i + 1}"
+                    }
+                    val w = item.optInt("w", 0)
+                    val h = item.optInt("h", 0)
+                    val fmt = detectImageFormatLabel(imgUrl)
+                    detected.add(
+                        DetectedImageMedia(
+                            url = imgUrl,
+                            title = alt,
+                            width = w,
+                            height = h,
+                            formatLabel = fmt
+                        )
+                    )
+                }
+                callbacks.onImagesDetected(tabId, detected)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun detectImageFormatLabel(url: String): String {
+        val low = url.substringBefore('?').lowercase()
+        return when {
+            low.endsWith(".png") || low.startsWith("data:image/png") -> "PNG"
+            low.endsWith(".webp") || low.startsWith("data:image/webp") -> "WEBP"
+            low.endsWith(".gif") || low.startsWith("data:image/gif") -> "GIF"
+            low.endsWith(".svg") || low.startsWith("data:image/svg") -> "SVG"
+            low.endsWith(".jpg") || low.endsWith(".jpeg") || low.startsWith("data:image/jpeg") -> "JPG"
+            else -> "IMG"
         }
     }
 

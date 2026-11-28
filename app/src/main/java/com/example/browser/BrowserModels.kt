@@ -141,6 +141,25 @@ data class DetectedVideoMedia(
     val detectedAtMillis: Long = System.currentTimeMillis()
 )
 
+data class DetectedImageMedia(
+    val url: String,
+    val title: String,
+    val width: Int = 0,
+    val height: Int = 0,
+    val formatLabel: String = "IMG"
+) {
+    val resolutionLabel: String
+        get() = if (width > 0 && height > 0) "${width}×${height}" else "Full Size"
+}
+
+enum class ImageDownloadFormat(val label: String, val ext: String, val mimeType: String) {
+    ORIGINAL("Original", "", ""),
+    PNG("PNG", "png", "image/png"),
+    JPEG("JPEG", "jpg", "image/jpeg"),
+    WEBP("WEBP", "webp", "image/webp"),
+    PDF("PDF", "pdf", "application/pdf")
+}
+
 data class DownloadedMediaItem(
     val id: String,
     val title: String,

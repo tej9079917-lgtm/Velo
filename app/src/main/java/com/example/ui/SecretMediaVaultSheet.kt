@@ -1,10 +1,13 @@
 package com.example.ui
 
+import android.app.Activity
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -58,6 +61,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -70,6 +74,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -245,7 +250,10 @@ fun SecretMediaVaultSheet(
     items: List<SecretMediaItem>,
     imagePreview: Pair<SecretMediaItem, ByteArray>?,
     isBusy: Boolean,
+    pendingDeleteUris: List<Uri> = emptyList(),
     onHideUris: (List<Uri>, SecretMediaType?) -> Unit,
+    onOriginalDeleteFinished: (Int) -> Unit = {},
+    onClearPendingDeleteUris: () -> Unit = {},
     onOpenItem: (SecretMediaItem) -> Unit,
     onCloseImagePreview: () -> Unit,
     onExportItem: (SecretMediaItem, Uri) -> Unit,
@@ -263,6 +271,7 @@ fun SecretMediaVaultSheet(
     }
 
     BackHandler(onBack = onLockAndClose)
+    val context = LocalContext.current
 
     var selectedFilter by remember { mutableStateOf<SecretMediaType?>(null) }
     var pendingExportItem by remember { mutableStateOf<SecretMediaItem?>(null) }
@@ -271,14 +280,39 @@ fun SecretMediaVaultSheet(
         if (selectedFilter == null) items else items.filter { it.type == selectedFilter }
     }
 
+    // Android 11+ MediaStore delete confirmation dialog (removes unencrypted originals from Gallery & Files)
+    val deleteOriginalLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            onOriginalDeleteFinished(pendingDeleteUris.size)
+        } else {
+            onClearPendingDeleteUris()
+        }
+    }
+
+    LaunchedEffect(pendingDeleteUris) {
+        if (pendingDeleteUris.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, pendingDeleteUris)
+                deleteOriginalLauncher.launch(
+                    IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                )
+            } catch (_: Exception) {
+                onClearPendingDeleteUris()
+            }
+        }
+    }
+
+    // Use SAF OpenMultipleDocuments for all media types so Velo can encrypt AND remove the original from Gallery & Files
     val pickImagesLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 20)
+        contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isNotEmpty()) onHideUris(uris, SecretMediaType.IMAGE)
     }
 
     val pickVideosLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 10)
+        contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isNotEmpty()) onHideUris(uris, SecretMediaType.VIDEO)
     }
@@ -332,7 +366,7 @@ fun SecretMediaVaultSheet(
                     )
                 }
                 Text(
-                    text = "AES-256-GCM Encrypted • Hidden from system gallery",
+                    text = "AES-256-GCM Encrypted • Moves files out of Gallery & Files",
                     style = MaterialTheme.typography.labelSmall,
                     color = ShieldEmerald
                 )
@@ -355,7 +389,7 @@ fun SecretMediaVaultSheet(
             }
         }
 
-        // Quick Zero-Permission Hide Buttons Row (Videos, Images, PDFs, Audios)
+        // Quick Hide-and-Move Buttons Row (Videos, Images, PDFs, Audios)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -364,11 +398,7 @@ fun SecretMediaVaultSheet(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
-                onClick = {
-                    pickVideosLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
-                    )
-                },
+                onClick = { pickVideosLauncher.launch(arrayOf("video/*")) },
                 enabled = !isBusy,
                 modifier = Modifier.testTag("vault_hide_videos_button")
             ) {
@@ -377,11 +407,7 @@ fun SecretMediaVaultSheet(
                 Text("+ Videos")
             }
             Button(
-                onClick = {
-                    pickImagesLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                },
+                onClick = { pickImagesLauncher.launch(arrayOf("image/*")) },
                 enabled = !isBusy,
                 modifier = Modifier.testTag("vault_hide_images_button")
             ) {

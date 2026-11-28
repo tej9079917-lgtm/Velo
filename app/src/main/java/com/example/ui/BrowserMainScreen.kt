@@ -64,6 +64,7 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -111,6 +112,7 @@ import com.example.browser.ActiveOverlay
 import com.example.browser.BrowserTab
 import com.example.browser.ExternalOpenRequest
 import com.example.browser.FocusSessionState
+import com.example.browser.ImageDownloadFormat
 import com.example.browser.SecretMediaType
 import com.example.browser.SplitPane
 import com.example.browser.TabWebCallbacks
@@ -170,6 +172,7 @@ fun BrowserMainScreen(
     val findState by viewModel.findState.collectAsStateWithLifecycle()
 
     val detectedVideos by viewModel.detectedVideosForActiveTab.collectAsStateWithLifecycle()
+    val detectedImages by viewModel.detectedImagesForActiveTab.collectAsStateWithLifecycle()
     val downloadedMedia by viewModel.downloadedMedia.collectAsStateWithLifecycle()
     val activeDownload by viewModel.activeDownload.collectAsStateWithLifecycle()
     val videoPlayerRequest by viewModel.videoPlayerRequest.collectAsStateWithLifecycle()
@@ -185,9 +188,11 @@ fun BrowserMainScreen(
     val secretVaultError by viewModel.secretVaultError.collectAsStateWithLifecycle()
     val secretMediaItems by viewModel.secretMediaItems.collectAsStateWithLifecycle()
     val secretImagePreview by viewModel.secretImagePreview.collectAsStateWithLifecycle()
+    val pendingDeleteOriginalUris by viewModel.pendingDeleteOriginalUris.collectAsStateWithLifecycle()
     val backgroundAudioActive by viewModel.backgroundAudioActive.collectAsStateWithLifecycle()
 
     var longPressedImage by remember { mutableStateOf<Pair<String, String?>?>(null) }
+    var longPressImageFormat by remember { mutableStateOf(ImageDownloadFormat.ORIGINAL) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     val activity = context as? Activity
@@ -243,6 +248,9 @@ fun BrowserMainScreen(
                 },
                 onVideoDetected = { tabId, media ->
                     viewModel.recordDetectedVideo(tabId, media)
+                },
+                onImagesDetected = { tabId, images ->
+                    viewModel.recordDetectedImages(tabId, images)
                 },
                 onDownloadRequested = { _, url, userAgent, contentDisposition, mimeType, referer ->
                     viewModel.startWebFileDownload(
@@ -1169,10 +1177,12 @@ fun BrowserMainScreen(
                     }
                 }
 
-                // Floating "Download Video" Pill Button when playable video is detected on the active tab
+                // Floating "Download Media / Video" Pill Button available on ANY active webpage (no download link required!)
                 if (!isInPipMode) {
+                    val hasWebPage = activeTab.url.startsWith("http://", ignoreCase = true) ||
+                        activeTab.url.startsWith("https://", ignoreCase = true)
                     androidx.compose.animation.AnimatedVisibility(
-                        visible = detectedVideos.isNotEmpty() || activeDownload != null,
+                        visible = hasWebPage || detectedVideos.isNotEmpty() || activeDownload != null,
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
                             .padding(end = 16.dp, bottom = if (statusBanner != null) 62.dp else 16.dp)
@@ -1186,6 +1196,7 @@ fun BrowserMainScreen(
                                 .height(48.dp)
                                 .clickable {
                                     webViewManager.scanPageForVideos(activeTab.id)
+                                    webViewManager.scanPageForImages(activeTab.id)
                                     viewModel.setOverlay(ActiveOverlay.VIDEO_DOWNLOADER)
                                 }
                                 .testTag("floating_download_video_button")
@@ -1210,14 +1221,15 @@ fun BrowserMainScreen(
                                 } else {
                                     Icon(
                                         imageVector = Icons.Default.Download,
-                                        contentDescription = "Download playing video",
+                                        contentDescription = "Download videos and images from page",
                                         modifier = Modifier.size(18.dp)
                                     )
+                                    val totalMedia = detectedVideos.size + detectedImages.size
                                     Text(
-                                        text = if (detectedVideos.size > 1) {
-                                            "Download Video (${detectedVideos.size})"
-                                        } else {
-                                            "Download Video"
+                                        text = when {
+                                            detectedVideos.isNotEmpty() -> "Download Video (${detectedVideos.size})"
+                                            totalMedia > 0 -> "Save Media ($totalMedia)"
+                                            else -> "Save Media"
                                         },
                                         style = MaterialTheme.typography.labelLarge,
                                         fontWeight = FontWeight.Bold
@@ -1457,6 +1469,7 @@ fun BrowserMainScreen(
                     onOpenNewPrivateTab = { viewModel.createNewTab(isPrivate = true) },
                     onOpenVideoDownloader = {
                         webViewManager.scanPageForVideos(activeTab.id)
+                        webViewManager.scanPageForImages(activeTab.id)
                         viewModel.setOverlay(ActiveOverlay.VIDEO_DOWNLOADER)
                     },
                     onOpenVideoPlayer = {
@@ -1709,14 +1722,22 @@ fun BrowserMainScreen(
 
                 ActiveOverlay.VIDEO_DOWNLOADER -> VideoDownloaderSheet(
                     detectedVideos = detectedVideos,
+                    detectedImages = detectedImages,
                     downloadedVideos = downloadedMedia,
                     activeDownload = activeDownload,
                     onRescanPage = {
                         webViewManager.scanPageForVideos(activeTab.id)
-                        viewModel.showTransientBanner("Scanned current webpage for playable video streams.")
+                        webViewManager.scanPageForImages(activeTab.id)
+                        viewModel.showTransientBanner("Scanned webpage for videos & full-size images.")
                     },
                     onDownloadVideo = { url, title, quality ->
                         viewModel.startVideoDownload(url, title, quality)
+                    },
+                    onSystemDownload = { url, title ->
+                        viewModel.enqueueSystemDownload(url, title)
+                    },
+                    onDownloadImageInFormat = { url, title, fmt ->
+                        viewModel.downloadImageInFormat(url, title, fmt)
                     },
                     onCancelDownload = { viewModel.cancelVideoDownload() },
                     onPlayStream = { media ->
@@ -1733,12 +1754,15 @@ fun BrowserMainScreen(
                     onPlayDownloaded = { item ->
                         viewModel.openDownloadedItem(item)
                     },
+                    onShareDownloaded = { item ->
+                        viewModel.shareDownloadedItem(item)
+                    },
                     onHideDownloadedInVault = { item ->
                         val lowerMime = item.mimeType.lowercase()
                         val fmt = item.formatLabel.uppercase()
                         val mediaType = when {
                             lowerMime == "application/pdf" || fmt == "PDF" -> SecretMediaType.PDF
-                            lowerMime.startsWith("image/") || fmt in setOf("PNG", "JPG", "WEBP", "GIF", "IMAGE") -> SecretMediaType.IMAGE
+                            lowerMime.startsWith("image/") || fmt in setOf("PNG", "JPG", "JPEG", "WEBP", "GIF", "IMAGE") -> SecretMediaType.IMAGE
                             lowerMime.startsWith("audio/") || fmt in setOf("MP3", "M4A", "WAV", "OGG", "FLAC", "AUDIO") -> SecretMediaType.AUDIO
                             else -> SecretMediaType.VIDEO
                         }
@@ -1850,7 +1874,10 @@ fun BrowserMainScreen(
                             items = secretMediaItems,
                             imagePreview = secretImagePreview,
                             isBusy = secretVaultBusy,
+                            pendingDeleteUris = pendingDeleteOriginalUris,
                             onHideUris = { uris, type -> viewModel.hideUrisInSecretVault(uris, type) },
+                            onOriginalDeleteFinished = { count -> viewModel.onOriginalDeletePromptFinished(count) },
+                            onClearPendingDeleteUris = { viewModel.clearPendingDeleteOriginalUris() },
                             onOpenItem = { viewModel.openSecretMediaItem(it) },
                             onCloseImagePreview = { viewModel.closeSecretImagePreview() },
                             onExportItem = { item, uri -> viewModel.exportSecretMediaItem(item, uri) },
@@ -1887,41 +1914,48 @@ fun BrowserMainScreen(
             }
         }
 
-        // Long-press webpage image download dialog
+        // Long-press webpage image download dialog with Full-Size Format Picker
         val pendingImg = longPressedImage
         if (pendingImg != null) {
             AlertDialog(
                 onDismissRequest = { longPressedImage = null },
-                title = { Text("Image Options") },
+                title = { Text("Download Full-Size Image") },
                 text = {
-                    Text(
-                        text = "Save this image directly to Downloads/Velo and open it offline anytime.",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = "Choose output format to save full resolution to Downloads/Velo:",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            ImageDownloadFormat.entries.forEach { fmt ->
+                                FilterChip(
+                                    selected = longPressImageFormat == fmt,
+                                    onClick = { longPressImageFormat = fmt },
+                                    label = { Text(fmt.label) }
+                                )
+                            }
+                        }
+                    }
                 },
                 confirmButton = {
                     Button(
                         onClick = {
                             val (imgUrl, referer) = pendingImg
+                            val chosenFmt = longPressImageFormat
                             longPressedImage = null
-                            if (imgUrl.startsWith("data:", ignoreCase = true)) {
-                                val header = imgUrl.substringAfter("data:").substringBefore(",", "")
-                                val mime = header.substringBefore(";").ifBlank { "image/png" }
-                                val ext = mime.substringAfter("/", "png")
-                                val payload = imgUrl.substringAfter(",", "")
-                                viewModel.saveInlineDataDownload("Web_Image.$ext", mime, payload)
-                            } else {
-                                viewModel.startWebFileDownload(
-                                    url = imgUrl,
-                                    mimeType = "image/jpeg",
-                                    referer = referer,
-                                    autoOpenIfPdf = false
-                                )
-                            }
+                            viewModel.downloadImageInFormat(
+                                imageUrl = imgUrl,
+                                title = "",
+                                format = chosenFmt,
+                                referer = referer
+                            )
                         },
                         modifier = Modifier.testTag("confirm_download_image_button")
                     ) {
-                        Text("Download Image")
+                        Text("Save (${longPressImageFormat.label})")
                     }
                 },
                 dismissButton = {

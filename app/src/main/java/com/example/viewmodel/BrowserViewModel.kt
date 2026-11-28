@@ -2,6 +2,8 @@ package com.example.viewmodel
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.Log
 import android.webkit.WebView
@@ -13,11 +15,13 @@ import com.example.browser.ActiveOverlay
 import com.example.browser.AdBlockerEngine
 import com.example.browser.BrowserSettings
 import com.example.browser.BrowserTab
+import com.example.browser.DetectedImageMedia
 import com.example.browser.DetectedVideoMedia
 import com.example.browser.DownloadedMediaItem
 import com.example.browser.ExternalOpenRequest
 import com.example.browser.FindInPageState
 import com.example.browser.FocusSessionState
+import com.example.browser.ImageDownloadFormat
 import com.example.browser.ImageViewerRequest
 import com.example.browser.NetworkRequestLog
 import com.example.browser.OfflinePageArchiver
@@ -62,9 +66,11 @@ import com.example.data.remote.VaultItemDoc
 import com.example.data.remote.VeloSyncRepository
 import com.example.media.PdfEngine
 import com.example.media.SpeedTestEngine
+import com.example.media.VeloDownloadManagerWrapper
 import com.example.media.VideoDownloadEngine
 import com.example.system.MediaPlaybackForegroundService
 import com.example.system.NetworkConnectivityObserver
+import com.example.system.VeloFileSharing
 import com.example.system.VeloNotificationManager
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestoreException
@@ -211,10 +217,18 @@ class BrowserViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // --- VIDEO DETECTOR, DOWNLOADER & PLAYER STATE ---
+    // --- VIDEO & IMAGE DETECTOR, DOWNLOADER & PLAYER STATE ---
+    private val systemDownloadManager = VeloDownloadManagerWrapper(appContext)
+
     private val _detectedVideosByTab = MutableStateFlow<Map<String, List<DetectedVideoMedia>>>(emptyMap())
     val detectedVideosForActiveTab: StateFlow<List<DetectedVideoMedia>> =
         combine(activeTab, _detectedVideosByTab) { tab, map ->
+            map[tab.id].orEmpty()
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _detectedImagesByTab = MutableStateFlow<Map<String, List<DetectedImageMedia>>>(emptyMap())
+    val detectedImagesForActiveTab: StateFlow<List<DetectedImageMedia>> =
+        combine(activeTab, _detectedImagesByTab) { tab, map ->
             map[tab.id].orEmpty()
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -311,6 +325,9 @@ class BrowserViewModel(
 
     private val _secretImagePreview = MutableStateFlow<Pair<SecretMediaItem, ByteArray>?>(null)
     val secretImagePreview: StateFlow<Pair<SecretMediaItem, ByteArray>?> = _secretImagePreview.asStateFlow()
+
+    private val _pendingDeleteOriginalUris = MutableStateFlow<List<Uri>>(emptyList())
+    val pendingDeleteOriginalUris: StateFlow<List<Uri>> = _pendingDeleteOriginalUris.asStateFlow()
 
     // --- ALL-IN-ONE WEB APPS HUB & BACKGROUND AUDIO FOREGROUND SERVICE ---
     private val _backgroundAudioActive = MutableStateFlow(false)
@@ -1574,6 +1591,12 @@ class BrowserViewModel(
         }
     }
 
+    fun recordDetectedImages(tabId: String, images: List<DetectedImageMedia>) {
+        _detectedImagesByTab.update { currentMap ->
+            currentMap + (tabId to images)
+        }
+    }
+
     fun startVideoDownload(url: String, title: String, qualityLabel: String = "HD") {
         startWebFileDownload(
             url = url,
@@ -1585,6 +1608,64 @@ class BrowserViewModel(
             referer = activeTab.value.url.takeIf { it.startsWith("http") },
             autoOpenIfPdf = false
         )
+    }
+
+    fun enqueueSystemDownload(url: String, title: String = "", mimeType: String = "") {
+        val result = systemDownloadManager.enqueueSystemDownload(
+            url = url,
+            suggestedFileName = title,
+            mimeType = mimeType,
+            referer = activeTab.value.url.takeIf { it.startsWith("http") }
+        )
+        result.onSuccess { enq ->
+            showTransientBanner("Queued \"${enq.fileName}\" in Android DownloadManager (Downloads/Velo).")
+        }.onFailure { err ->
+            showTransientBanner(err.localizedMessage ?: "Unable to queue system download.")
+        }
+    }
+
+    fun downloadImageInFormat(
+        imageUrl: String,
+        title: String,
+        format: ImageDownloadFormat,
+        referer: String? = null
+    ) {
+        val cleanUrl = imageUrl.trim()
+        if (cleanUrl.isBlank()) return
+        val displayTitle = title.trim().ifBlank { VideoDownloadEngine.deriveTitleFromUrl(cleanUrl) }
+        _activeDownload.value = ActiveDownloadProgress(
+            url = cleanUrl,
+            title = "$displayTitle (${format.label})",
+            downloadedBytes = 0L,
+            totalBytes = -1L
+        )
+        showTransientBanner("Downloading full-size image as ${format.label}...")
+        viewModelScope.launch {
+            val result = videoDownloadEngine.downloadImageInFormat(
+                rawUrl = cleanUrl,
+                title = displayTitle,
+                targetFormat = format,
+                referer = referer ?: activeTab.value.url.takeIf { it.startsWith("http") }
+            )
+            _activeDownload.value = null
+            result.onSuccess { done ->
+                handleCompletedDownload(done, autoOpenIfPdf = false)
+            }.onFailure { err ->
+                showTransientBanner(err.localizedMessage ?: "Image download failed.")
+            }
+        }
+    }
+
+    fun shareDownloadedItem(item: DownloadedMediaItem) {
+        val file = java.io.File(item.localPath)
+        VeloFileSharing.shareFile(
+            context = appContext,
+            file = file,
+            mimeType = item.mimeType,
+            title = item.title
+        ).onFailure { err ->
+            showTransientBanner(err.localizedMessage ?: "Unable to share \"${item.title}\".")
+        }
     }
 
     fun startWebFileDownload(
@@ -2227,7 +2308,22 @@ class BrowserViewModel(
         }
     }
 
-    fun hideUrisInSecretVault(uris: List<Uri>, forcedType: SecretMediaType? = null) {
+    fun clearPendingDeleteOriginalUris() {
+        _pendingDeleteOriginalUris.value = emptyList()
+    }
+
+    fun onOriginalDeletePromptFinished(removedCount: Int) {
+        _pendingDeleteOriginalUris.value = emptyList()
+        if (removedCount > 0) {
+            showTransientBanner("Removed $removedCount original file(s) from Gallery & Files — now hidden in Velo Vault only.")
+        }
+    }
+
+    fun hideUrisInSecretVault(
+        uris: List<Uri>,
+        forcedType: SecretMediaType? = null,
+        removeOriginalsFromDevice: Boolean = true
+    ) {
         val key = _secretVaultKey.value
         if (key == null) {
             showTransientBanner("Unlock Secret Vault first by typing your code in the search bar.")
@@ -2238,6 +2334,8 @@ class BrowserViewModel(
         viewModelScope.launch {
             _secretVaultBusy.value = true
             var hiddenCount = 0
+            var deletedOriginals = 0
+            val needsDeleteConsent = mutableListOf<Uri>()
             try {
                 for (uri in uris) {
                     val mime = appContext.contentResolver.getType(uri).orEmpty()
@@ -2263,16 +2361,57 @@ class BrowserViewModel(
                             )
                         )
                         hiddenCount++
+
+                        // Permanently remove the unencrypted original from Gallery/Files ONLY after verified encryption
+                        if (removeOriginalsFromDevice) {
+                            val removed = withContext(Dispatchers.IO) {
+                                tryDeleteSourceUri(uri)
+                            }
+                            if (removed) {
+                                deletedOriginals++
+                            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                                uri.authority?.contains("media", ignoreCase = true) == true
+                            ) {
+                                needsDeleteConsent.add(uri)
+                            }
+                        }
                     }
                 }
-                if (hiddenCount > 0) {
-                    showTransientBanner("Encrypted & hid $hiddenCount item(s) inside Secret Vault.")
-                } else {
-                    showTransientBanner("Could not import selected media into Secret Vault.")
+                if (needsDeleteConsent.isNotEmpty()) {
+                    _pendingDeleteOriginalUris.value = needsDeleteConsent
+                }
+                when {
+                    hiddenCount == 0 -> showTransientBanner("Could not import selected media into Secret Vault.")
+                    deletedOriginals == hiddenCount -> showTransientBanner(
+                        "Encrypted & moved $hiddenCount item(s) to Secret Vault — removed from Gallery & Files."
+                    )
+                    needsDeleteConsent.isNotEmpty() -> showTransientBanner(
+                        "Encrypted $hiddenCount item(s). Tap Allow to remove original(s) from Gallery & Files."
+                    )
+                    deletedOriginals > 0 -> showTransientBanner(
+                        "Encrypted $hiddenCount item(s) ($deletedOriginals removed from Files/Gallery)."
+                    )
+                    else -> showTransientBanner(
+                        "Encrypted $hiddenCount item(s) in Secret Vault. Select via Files picker to auto-remove originals."
+                    )
                 }
             } finally {
                 _secretVaultBusy.value = false
             }
+        }
+    }
+
+    private fun tryDeleteSourceUri(uri: Uri): Boolean {
+        return try {
+            if (DocumentsContract.isDocumentUri(appContext, uri)) {
+                if (DocumentsContract.deleteDocument(appContext.contentResolver, uri)) {
+                    return true
+                }
+            }
+            val rows = appContext.contentResolver.delete(uri, null, null)
+            rows > 0
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -2318,8 +2457,11 @@ class BrowserViewModel(
                             byteSize = enc.plaintextByteSize
                         )
                     )
+                    withContext(Dispatchers.IO) {
+                        videoDownloadEngine.deletePublicDownloadsCopy(displayName)
+                    }
                     onOriginalHidden?.invoke()
-                    showTransientBanner("Encrypted \"$displayName\" into Secret Vault.")
+                    showTransientBanner("Encrypted & moved \"$displayName\" into Secret Vault (hidden from Gallery & Files).")
                 }.onFailure { err ->
                     showTransientBanner(err.localizedMessage ?: "Failed to encrypt file.")
                 }
